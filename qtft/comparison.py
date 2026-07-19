@@ -159,7 +159,7 @@ def _detect_parameter_differences(ensembles: dict) -> dict:
         ('epsilon_FtFt', lambda c: c.get('lj', {}).get('epsilon_FtFt')),
         ('epsilon_QtFt', lambda c: c.get('lj', {}).get('epsilon_QtFt')),
         ('epsilon_QtCFtC', lambda c: c.get('lj', {}).get('epsilon_QtCFtC')),
-        ('potential_type', lambda c: c.get('lj', {}).get('potential_type')),
+        ('potential_type', lambda c: c.get('potential_type', c.get('lj', {}).get('potential_type'))),
         ('box_size', lambda c: tuple(c.get('box_size', []))),
         ('temperature', lambda c: c.get('temperature')),
         ('timestep', lambda c: c.get('timestep')),

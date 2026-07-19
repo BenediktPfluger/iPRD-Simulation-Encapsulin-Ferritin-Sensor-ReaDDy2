@@ -1942,9 +1942,9 @@ def _generate_ensemble_title(config: Dict, n_replicas: int = None) -> str:
     n_qt = config.get('n_qt', '?')
     n_ft = config.get('n_ft', '?')
     
-    # Get potential type from nested or flat config
+    # Get potential type: top-level (current) with fallback to lj (pre-move configs)
     lj = config.get('lj', {})
-    potential = lj.get('potential_type', config.get('potential_type', '?'))
+    potential = config.get('potential_type', lj.get('potential_type', '?'))
     
     if n_replicas is not None:
         return f"{n_qt}Qt + {n_ft}Ft ({potential}, N={n_replicas} replicas)"

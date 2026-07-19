@@ -229,9 +229,9 @@ class PhaseConfig:
     def __post_init__(self):
         if self.n_steps <= 0:
             raise ValueError(f"Phase '{self.name}' n_steps must be positive: {self.n_steps}")
-        if self.potential_type not in ("WCA", "LJ", "soft"):
+        if self.potential_type not in ("WCA", "LJ", "soft", "weak"):
             raise ValueError(
-                f"Phase '{self.name}' potential_type must be 'WCA', 'LJ', or 'soft', "
+                f"Phase '{self.name}' potential_type must be 'WCA', 'LJ', 'soft', or 'weak', "
                 f"got: {self.potential_type}"
             )
 
@@ -338,12 +338,11 @@ class LennardJonesConfig:
         LJ well depth for QtC-Ft. Defaults to epsilon_QtCFtC.
     epsilon_QtFtC : float, optional
         LJ well depth for Qt-FtC. Defaults to epsilon_QtCFtC.
-    potential_type : str
-        Type of potential: "WCA" (purely repulsive) or "LJ" (full Lennard-Jones)
-        - WCA: cutoff at 2^(1/6)*sigma ≈ 1.122*sigma (no attractive part)
-        - LJ: cutoff at 2.5*sigma (includes attractive well)
     cutoff_factor : float, optional
-        Cutoff distance as multiple of sigma. If None, auto-calculated from potential_type.
+        Optional override for the cutoff as a multiple of sigma. If None (default), the
+        cutoff is derived from the active mode in _add_potentials: WCA -> 2^(1/6)*sigma
+        (purely repulsive), LJ -> 2.5*sigma (attractive well). The mode is selected by
+        ``SimulationConfig.potential_type`` (not here); soft/weak ignore this field.
     """
     # Primary free-free epsilon values
     epsilon_QtQt: float = 10.0
@@ -361,10 +360,12 @@ class LennardJonesConfig:
     epsilon_QtCFt: Optional[float] = None
     epsilon_QtFtC: Optional[float] = None
     
-    # Potential type and cutoff
-    potential_type: str = "WCA"
+    # Cutoff distance as a multiple of sigma. Optional OVERRIDE only: when None (default)
+    # the WCA/LJ cutoff is chosen from SimulationConfig.potential_type in _add_potentials
+    # (WCA -> 2^(1/6)*sigma, LJ -> 2.5*sigma). The mode selector lives on SimulationConfig,
+    # not here (soft/weak ignore this).
     cutoff_factor: Optional[float] = None
-    
+
     # WCA cutoff factor: 2^(1/6) ≈ 1.122462
     WCA_CUTOFF_FACTOR: float = field(default=1.122462, repr=False)
     LJ_CUTOFF_FACTOR: float = field(default=2.5, repr=False)
@@ -387,22 +388,9 @@ class LennardJonesConfig:
             self.epsilon_QtCFt = self.epsilon_QtCFtC
         if self.epsilon_QtFtC is None:
             self.epsilon_QtFtC = self.epsilon_QtCFtC
-        
-        # Auto-calculate cutoff_factor based on potential_type if not specified
-        if self.cutoff_factor is None:
-            if self.potential_type == "WCA":
-                self.cutoff_factor = self.WCA_CUTOFF_FACTOR
-            elif self.potential_type == "LJ":
-                self.cutoff_factor = self.LJ_CUTOFF_FACTOR
-            elif self.potential_type == "soft":
-                # Harmonic repulsion has no cutoff (it uses an interaction_distance);
-                # store a positive placeholder so _validate's cutoff_factor > 0 passes.
-                self.cutoff_factor = self.WCA_CUTOFF_FACTOR
-            else:
-                raise ValueError(
-                    f"Unknown potential_type: {self.potential_type}. Use 'WCA', 'LJ', or 'soft'."
-                )
-        
+
+        # cutoff_factor is left as-is: None means "derive from the mode in _add_potentials";
+        # a number is an explicit override honored for WCA/LJ.
         self._validate()
     
     def _validate(self):
@@ -422,13 +410,9 @@ class LennardJonesConfig:
         for name, val in eps_pairs.items():
             if val < 0:
                 raise ValueError(f"{name} must be non-negative, got {val}")
-        
-        if self.cutoff_factor <= 0:
+
+        if self.cutoff_factor is not None and self.cutoff_factor <= 0:
             raise ValueError(f"Cutoff factor must be positive: {self.cutoff_factor}")
-        if self.potential_type not in ("WCA", "LJ", "soft"):
-            raise ValueError(
-                f"potential_type must be 'WCA', 'LJ', or 'soft', got: {self.potential_type}"
-            )
     
     def get_epsilon(self, type1: str, type2: str) -> float:
         """
@@ -471,7 +455,7 @@ class SoftPotentialConfig:
     """
     Configuration for the "soft" excluded-volume mode (per-pair harmonic repulsion).
 
-    Selected via ``lj.potential_type == "soft"`` (or per-phase / equilibration).
+    Selected via ``SimulationConfig.potential_type == "soft"`` (or per-phase / equilibration).
     Instead of a stiff 12-6 Lennard-Jones wall, each enabled type pair gets a
     ReaDDy ``add_harmonic_repulsion`` potential: force is linear and bounded, and
     vanishes at the contact distance (r_i + r_j). Because overlaps produce small
@@ -590,6 +574,111 @@ class SoftPotentialConfig:
 
 
 @dataclass
+class WeakInteractionConfig:
+    """
+    Configuration for the "weak" mode (per-pair piecewise-harmonic weak interaction).
+
+    Selected via ``SimulationConfig.potential_type == "weak"`` (or per-phase / equilibration). Uses
+    ReaDDy ``add_weak_interaction_piecewise_harmonic``: a *soft attractive* pair potential
+    with a harmonic repulsive branch, a well of depth ``depth`` whose minimum sits at the
+    contact distance (r_i + r_j), and a smooth return to zero at ``cutoff``. It provides
+    LJ-like attraction WITHOUT the r^-12 wall, so it can run at a much larger timestep than
+    12-6 Lennard-Jones.
+
+    Weak mode is self-contained: when active, ``_add_potentials`` reads ONLY this config
+    (``LennardJonesConfig.epsilon_*`` and ``SoftPotentialConfig`` are ignored). Each pair
+    has its own force constant ``k_*`` (kJ/(mol*nm^2), the branch stiffness) and well depth
+    ``depth_*`` (kJ/mol, the attraction strength — the analog of LJ epsilon). ReaDDy's
+    ``desired_distance`` is derived from contact (r_i + r_j) and ``cutoff`` from a single
+    global ``cutoff_factor`` (cutoff = cutoff_factor * contact). Setting a pair's ``k`` to 0
+    disables that pair entirely (the potential is not registered).
+
+    Both ``k_*`` and ``depth_*`` follow the same cascade hierarchy as ``LennardJonesConfig``:
+    free-free explicit -> cluster (defaults to free-free) -> mixed (defaults to cluster).
+    """
+    # Primary free-free force constants (kJ/(mol*nm^2)); 0 disables that pair.
+    k_QtQt: float = 10.0
+    k_FtFt: float = 10.0
+    k_QtFt: float = 10.0
+    # Cluster force constants (cascade from free-free)
+    k_QtCQtC: Optional[float] = None
+    k_FtCFtC: Optional[float] = None
+    k_QtCFtC: Optional[float] = None
+    # Mixed-state force constants (cascade from cluster)
+    k_QtQtC: Optional[float] = None
+    k_FtFtC: Optional[float] = None
+    k_QtCFt: Optional[float] = None
+    k_QtFtC: Optional[float] = None
+
+    # Primary free-free well depths (kJ/mol; attraction strength). 0 = no attraction.
+    depth_QtQt: float = 1.0
+    depth_FtFt: float = 1.0
+    depth_QtFt: float = 1.0
+    # Cluster depths (cascade from free-free)
+    depth_QtCQtC: Optional[float] = None
+    depth_FtCFtC: Optional[float] = None
+    depth_QtCFtC: Optional[float] = None
+    # Mixed-state depths (cascade from cluster)
+    depth_QtQtC: Optional[float] = None
+    depth_FtFtC: Optional[float] = None
+    depth_QtCFt: Optional[float] = None
+    depth_QtFtC: Optional[float] = None
+
+    # Global cutoff as a multiple of the contact distance (must be > 1 for a well to exist).
+    cutoff_factor: float = 2.0
+
+    # (particle-type suffixes in cascade order, shared by both k_* and depth_*)
+    _CLUSTER_FROM_FREE = (("QtCQtC", "QtQt"), ("FtCFtC", "FtFt"), ("QtCFtC", "QtFt"))
+    _MIXED_FROM_CLUSTER = (("QtQtC", "QtCQtC"), ("FtFtC", "FtCFtC"),
+                           ("QtCFt", "QtCFtC"), ("QtFtC", "QtCFtC"))
+
+    def __post_init__(self):
+        # Cascade both families (cluster<-free, then mixed<-cluster) exactly like LJ epsilon.
+        for prefix in ("k_", "depth_"):
+            for dst, src in self._CLUSTER_FROM_FREE:
+                if getattr(self, prefix + dst) is None:
+                    setattr(self, prefix + dst, getattr(self, prefix + src))
+            for dst, src in self._MIXED_FROM_CLUSTER:
+                if getattr(self, prefix + dst) is None:
+                    setattr(self, prefix + dst, getattr(self, prefix + src))
+        self._validate()
+
+    def _validate(self):
+        suffixes = ["QtQt", "FtFt", "QtFt", "QtCQtC", "FtCFtC", "QtCFtC",
+                    "QtQtC", "FtFtC", "QtCFt", "QtFtC"]
+        for s in suffixes:
+            k = getattr(self, "k_" + s)
+            d = getattr(self, "depth_" + s)
+            if k < 0:
+                raise ValueError(f"k_{s} must be non-negative, got {k}")
+            if d < 0:
+                raise ValueError(f"depth_{s} must be non-negative, got {d}")
+        if self.cutoff_factor <= 0:
+            raise ValueError(f"cutoff_factor must be positive, got {self.cutoff_factor}")
+
+    @staticmethod
+    def _pair_suffix(type1: str, type2: str) -> str:
+        pair = tuple(sorted([type1, type2]))
+        mapping = {
+            ("Ft", "Ft"): "FtFt", ("Ft", "FtC"): "FtFtC", ("Ft", "Qt"): "QtFt",
+            ("Ft", "QtC"): "QtCFt", ("FtC", "FtC"): "FtCFtC", ("FtC", "Qt"): "QtFtC",
+            ("FtC", "QtC"): "QtCFtC", ("Qt", "Qt"): "QtQt", ("Qt", "QtC"): "QtQtC",
+            ("QtC", "QtC"): "QtCQtC",
+        }
+        if pair not in mapping:
+            raise ValueError(f"Unknown particle pair: {type1}-{type2}")
+        return mapping[pair]
+
+    def get_force_constant(self, type1: str, type2: str) -> float:
+        """Force constant (kJ/(mol*nm^2)) for a pair (0 = disabled)."""
+        return getattr(self, "k_" + self._pair_suffix(type1, type2))
+
+    def get_depth(self, type1: str, type2: str) -> float:
+        """Well depth (kJ/mol) for a pair (0 = no attraction)."""
+        return getattr(self, "depth_" + self._pair_suffix(type1, type2))
+
+
+@dataclass
 class SimulationConfig:
     """
     Complete simulation configuration.
@@ -640,13 +729,22 @@ class SimulationConfig:
     
     # Topology configuration
     topology: TopologyConfig = field(default_factory=TopologyConfig)
-    
-    # Lennard-Jones configuration
+
+    # Production potential selector (single source of truth). Picks which parameter block
+    # below is registered: "WCA"/"LJ" -> lj.epsilon_*, "soft" -> soft.k_*,
+    # "weak" -> weak.k_*/depth_*; the others are ignored.
+    potential_type: str = "WCA"
+
+    # Lennard-Jones configuration (epsilons used only when potential_type is "WCA"/"LJ")
     lj: LennardJonesConfig = field(default_factory=LennardJonesConfig)
 
     # Soft (harmonic-repulsion) configuration, used when potential_type == "soft".
     # Ignored by the WCA/LJ paths, so existing configs are unaffected.
     soft: SoftPotentialConfig = field(default_factory=SoftPotentialConfig)
+
+    # Weak-interaction (piecewise-harmonic) configuration, used when potential_type == "weak".
+    # Ignored by the WCA/LJ/soft paths, so existing configs are unaffected.
+    weak: WeakInteractionConfig = field(default_factory=WeakInteractionConfig)
 
     # Simulation box
     box_size: Tuple[float, float, float] = (50.0, 50.0, 50.0)
@@ -657,8 +755,8 @@ class SimulationConfig:
 
     # Potential used during equilibration (reactions are always off then). Defaults to
     # "WCA" (purely repulsive) so equilibration relaxes overlaps without attraction,
-    # regardless of the production potential in lj.potential_type. Set to "LJ" to
-    # equilibrate under the full attractive potential instead.
+    # regardless of the production potential (config.potential_type). Set to "LJ"/"soft"/
+    # "weak" to equilibrate under a different potential instead.
     equilibration_potential: str = "WCA"
 
     # Integration parameters
@@ -734,10 +832,16 @@ class SimulationConfig:
         if self.timestep <= 0:
             raise ValueError(f"Timestep must be positive: {self.timestep}")
 
-        # Check equilibration potential
-        if self.equilibration_potential not in ("WCA", "LJ", "soft"):
+        # Check production potential selector
+        if self.potential_type not in ("WCA", "LJ", "soft", "weak"):
             raise ValueError(
-                f"equilibration_potential must be 'WCA', 'LJ', or 'soft', "
+                f"potential_type must be 'WCA', 'LJ', 'soft', or 'weak', got: {self.potential_type}"
+            )
+
+        # Check equilibration potential
+        if self.equilibration_potential not in ("WCA", "LJ", "soft", "weak"):
+            raise ValueError(
+                f"equilibration_potential must be 'WCA', 'LJ', 'soft', or 'weak', "
                 f"got: {self.equilibration_potential}"
             )
         
@@ -900,6 +1004,7 @@ class SimulationConfig:
         topop = params.get("topology", {})
         ljp = params.get("lj", {})
         softp = params.get("soft", {})
+        weakp = params.get("weak", {})
 
         def g(sub, key, default, flat_key):
             return sub.get(key, default) if is_nested else params.get(flat_key, default)
@@ -935,9 +1040,13 @@ class SimulationConfig:
             epsilon_FtFtC=g(ljp, "epsilon_FtFtC", None, "epsilon_FtFtC"),
             epsilon_QtCFt=g(ljp, "epsilon_QtCFt", None, "epsilon_QtCFt"),
             epsilon_QtFtC=g(ljp, "epsilon_QtFtC", None, "epsilon_QtFtC"),
-            potential_type=g(ljp, "potential_type", "WCA", "potential_type"),
             cutoff_factor=g(ljp, "cutoff_factor", None, "cutoff_factor"),
         )
+        # Production potential selector: prefer the top-level key; migrate from the old
+        # location (lj.potential_type) for configs written before it moved to SimulationConfig.
+        potential_type = params.get("potential_type")
+        if potential_type is None:
+            potential_type = ljp.get("potential_type", "WCA")
         # Backward-compat: soft configs written before per-pair support stored a single
         # `repulsion_force_constant`. Map it onto the three free-free constants on load so
         # old soft config JSONs still round-trip faithfully (cluster/mixed then cascade).
@@ -956,6 +1065,29 @@ class SimulationConfig:
             k_QtCFt=g(softp, "k_QtCFt", None, "k_QtCFt"),
             k_QtFtC=g(softp, "k_QtFtC", None, "k_QtFtC"),
         )
+        weak = WeakInteractionConfig(
+            k_QtQt=g(weakp, "k_QtQt", 10.0, "weak_k_QtQt"),
+            k_FtFt=g(weakp, "k_FtFt", 10.0, "weak_k_FtFt"),
+            k_QtFt=g(weakp, "k_QtFt", 10.0, "weak_k_QtFt"),
+            k_QtCQtC=g(weakp, "k_QtCQtC", None, "weak_k_QtCQtC"),
+            k_FtCFtC=g(weakp, "k_FtCFtC", None, "weak_k_FtCFtC"),
+            k_QtCFtC=g(weakp, "k_QtCFtC", None, "weak_k_QtCFtC"),
+            k_QtQtC=g(weakp, "k_QtQtC", None, "weak_k_QtQtC"),
+            k_FtFtC=g(weakp, "k_FtFtC", None, "weak_k_FtFtC"),
+            k_QtCFt=g(weakp, "k_QtCFt", None, "weak_k_QtCFt"),
+            k_QtFtC=g(weakp, "k_QtFtC", None, "weak_k_QtFtC"),
+            depth_QtQt=g(weakp, "depth_QtQt", 1.0, "weak_depth_QtQt"),
+            depth_FtFt=g(weakp, "depth_FtFt", 1.0, "weak_depth_FtFt"),
+            depth_QtFt=g(weakp, "depth_QtFt", 1.0, "weak_depth_QtFt"),
+            depth_QtCQtC=g(weakp, "depth_QtCQtC", None, "weak_depth_QtCQtC"),
+            depth_FtCFtC=g(weakp, "depth_FtCFtC", None, "weak_depth_FtCFtC"),
+            depth_QtCFtC=g(weakp, "depth_QtCFtC", None, "weak_depth_QtCFtC"),
+            depth_QtQtC=g(weakp, "depth_QtQtC", None, "weak_depth_QtQtC"),
+            depth_FtFtC=g(weakp, "depth_FtFtC", None, "weak_depth_FtFtC"),
+            depth_QtCFt=g(weakp, "depth_QtCFt", None, "weak_depth_QtCFt"),
+            depth_QtFtC=g(weakp, "depth_QtFtC", None, "weak_depth_QtFtC"),
+            cutoff_factor=g(weakp, "cutoff_factor", 2.0, "weak_cutoff_factor"),
+        )
 
         # Handle box_size - convert list to tuple if needed
         box_size = params.get("box_size", (50.0, 50.0, 50.0))
@@ -971,8 +1103,10 @@ class SimulationConfig:
             qt=qt,
             ft=ft,
             topology=topology,
+            potential_type=potential_type,
             lj=lj,
             soft=soft,
+            weak=weak,
             box_size=box_size,
             periodic_boundary=params.get("periodic_boundary", True),
             temperature=params.get("temperature", 300.0),
@@ -1021,6 +1155,8 @@ class SimulationConfig:
                 "ft_monovalent": self.topology.ft_monovalent,
                 "koff": self.topology.koff,
             },
+            # Production potential selector (single source of truth)
+            "potential_type": self.potential_type,
             # Nested LJ config (resolved values, not None)
             "lj": {
                 "epsilon_QtQt": self.lj.epsilon_QtQt,
@@ -1033,7 +1169,6 @@ class SimulationConfig:
                 "epsilon_FtFtC": self.lj.epsilon_FtFtC,
                 "epsilon_QtCFt": self.lj.epsilon_QtCFt,
                 "epsilon_QtFtC": self.lj.epsilon_QtFtC,
-                "potential_type": self.lj.potential_type,
                 "cutoff_factor": self.lj.cutoff_factor,
             },
             # Nested soft (harmonic-repulsion) config (resolved per-pair values, not None)
@@ -1048,6 +1183,20 @@ class SimulationConfig:
                 "k_FtFtC": self.soft.k_FtFtC,
                 "k_QtCFt": self.soft.k_QtCFt,
                 "k_QtFtC": self.soft.k_QtFtC,
+            },
+            # Nested weak (piecewise-harmonic) config (resolved per-pair values, not None)
+            "weak": {
+                "k_QtQt": self.weak.k_QtQt, "k_FtFt": self.weak.k_FtFt, "k_QtFt": self.weak.k_QtFt,
+                "k_QtCQtC": self.weak.k_QtCQtC, "k_FtCFtC": self.weak.k_FtCFtC,
+                "k_QtCFtC": self.weak.k_QtCFtC, "k_QtQtC": self.weak.k_QtQtC,
+                "k_FtFtC": self.weak.k_FtFtC, "k_QtCFt": self.weak.k_QtCFt,
+                "k_QtFtC": self.weak.k_QtFtC,
+                "depth_QtQt": self.weak.depth_QtQt, "depth_FtFt": self.weak.depth_FtFt,
+                "depth_QtFt": self.weak.depth_QtFt, "depth_QtCQtC": self.weak.depth_QtCQtC,
+                "depth_FtCFtC": self.weak.depth_FtCFtC, "depth_QtCFtC": self.weak.depth_QtCFtC,
+                "depth_QtQtC": self.weak.depth_QtQtC, "depth_FtFtC": self.weak.depth_FtFtC,
+                "depth_QtCFt": self.weak.depth_QtCFt, "depth_QtFtC": self.weak.depth_QtFtC,
+                "cutoff_factor": self.weak.cutoff_factor,
             },
             # Simulation parameters
             "box_size": list(self.box_size),  # Convert tuple to list for JSON
@@ -1109,7 +1258,7 @@ class SimulationConfig:
             "epsilon_FtFtC": self.lj.epsilon_FtFtC,
             "epsilon_QtCFt": self.lj.epsilon_QtCFt,
             "epsilon_QtFtC": self.lj.epsilon_QtFtC,
-            "potential_type": self.lj.potential_type,
+            "potential_type": self.potential_type,
             "cutoff_factor": self.lj.cutoff_factor,
             # Soft (harmonic-repulsion) per-pair force constants
             "k_QtQt": self.soft.k_QtQt,
@@ -1122,6 +1271,19 @@ class SimulationConfig:
             "k_FtFtC": self.soft.k_FtFtC,
             "k_QtCFt": self.soft.k_QtCFt,
             "k_QtFtC": self.soft.k_QtFtC,
+            # Weak (piecewise-harmonic) per-pair force constants + depths (prefixed to avoid
+            # colliding with the soft k_* keys above in this flat mapping)
+            "weak_k_QtQt": self.weak.k_QtQt, "weak_k_FtFt": self.weak.k_FtFt,
+            "weak_k_QtFt": self.weak.k_QtFt, "weak_k_QtCQtC": self.weak.k_QtCQtC,
+            "weak_k_FtCFtC": self.weak.k_FtCFtC, "weak_k_QtCFtC": self.weak.k_QtCFtC,
+            "weak_k_QtQtC": self.weak.k_QtQtC, "weak_k_FtFtC": self.weak.k_FtFtC,
+            "weak_k_QtCFt": self.weak.k_QtCFt, "weak_k_QtFtC": self.weak.k_QtFtC,
+            "weak_depth_QtQt": self.weak.depth_QtQt, "weak_depth_FtFt": self.weak.depth_FtFt,
+            "weak_depth_QtFt": self.weak.depth_QtFt, "weak_depth_QtCQtC": self.weak.depth_QtCQtC,
+            "weak_depth_FtCFtC": self.weak.depth_FtCFtC, "weak_depth_QtCFtC": self.weak.depth_QtCFtC,
+            "weak_depth_QtQtC": self.weak.depth_QtQtC, "weak_depth_FtFtC": self.weak.depth_FtFtC,
+            "weak_depth_QtCFt": self.weak.depth_QtCFt, "weak_depth_QtFtC": self.weak.depth_QtFtC,
+            "weak_cutoff_factor": self.weak.cutoff_factor,
             # Simulation parameters
             "box_size": self.box_size,
             "periodic_boundary": self.periodic_boundary,
@@ -1161,7 +1323,7 @@ class SimulationConfig:
         print(f"  Bond-breaking rate (koff): {self.topology.koff} /(edge·ns)")
         print(f"  Bond stiffness: {self.topology.k_bond} kJ/(mol·nm²)")
         print(f"  Equilibrium bond length: {self.equilibrium_bond_length} nm")
-        if self.lj.potential_type == "soft":
+        if self.potential_type == "soft":
             # Soft mode is self-contained: show the per-pair repulsion constants; the LJ
             # epsilon values are ignored entirely in this mode.
             s = self.soft
@@ -1199,10 +1361,34 @@ class SimulationConfig:
             else:
                 print(f"  Mixed-state k: Qt-QtC={s.k_QtQtC}, Ft-FtC={s.k_FtFtC}, "
                       f"QtC-Ft={s.k_QtCFt}, Qt-FtC={s.k_QtFtC}")
+        elif self.potential_type == "weak":
+            w = self.weak
+            print(f"\nWeak interaction (piecewise-harmonic):")
+            print(f"  Potential type: weak   (lj.epsilon ignored in weak mode)")
+            print(f"  k     Qt-Qt={w.k_QtQt}, Ft-Ft={w.k_FtFt}, Qt-Ft={w.k_QtFt} kJ/(mol·nm²)")
+            print(f"  depth Qt-Qt={w.depth_QtQt}, Ft-Ft={w.depth_FtFt}, Qt-Ft={w.depth_QtFt} kJ/mol")
+            print(f"  cutoff: {w.cutoff_factor} × contact; well minimum at contact (r_i+r_j)")
+            k_default = (
+                w.k_QtCQtC == w.k_QtQt and w.k_FtCFtC == w.k_FtFt and w.k_QtCFtC == w.k_QtFt and
+                w.k_QtQtC == w.k_QtCQtC and w.k_FtFtC == w.k_FtCFtC and
+                w.k_QtCFt == w.k_QtCFtC and w.k_QtFtC == w.k_QtCFtC
+            )
+            d_default = (
+                w.depth_QtCQtC == w.depth_QtQt and w.depth_FtCFtC == w.depth_FtFt and
+                w.depth_QtCFtC == w.depth_QtFt and w.depth_QtQtC == w.depth_QtCQtC and
+                w.depth_FtFtC == w.depth_FtCFtC and w.depth_QtCFt == w.depth_QtCFtC and
+                w.depth_QtFtC == w.depth_QtCFtC
+            )
+            if k_default and d_default:
+                print(f"  Cluster/mixed k, depth: same as free (default)")
         else:
             print(f"\nLennard-Jones:")
-            print(f"  Potential type: {self.lj.potential_type}")
-            print(f"  Cutoff factor: {self.lj.cutoff_factor:.3f}")
+            print(f"  Potential type: {self.potential_type}")
+            # cutoff_factor may be None (derive from the mode); show the effective value.
+            _cf = self.lj.cutoff_factor
+            if _cf is None:
+                _cf = self.lj.LJ_CUTOFF_FACTOR if self.potential_type == "LJ" else self.lj.WCA_CUTOFF_FACTOR
+            print(f"  Cutoff factor: {_cf:.3f}")
             lj = self.lj
             print(f"  ε Qt-Qt: {lj.epsilon_QtQt} kJ/mol", end="")
             if lj.epsilon_QtCQtC == 0:
@@ -1377,18 +1563,22 @@ def format_param_string(config: "SimulationConfig") -> str:
     dt_str = f"dt{format_duration(config.timestep, ascii=True)}"
     time_str = format_duration(config.total_simulation_time_us * 1e3, ascii=True)
 
-    # Coefficient block: soft mode is self-contained (epsilon unused), so it encodes its
-    # three free-free force constants (kQQ/kFF/kQF); WCA/LJ encode the free-free epsilons
-    # (eQQ/eFF/eQF) exactly as before, so their filenames are byte-identical.
-    if lj.potential_type == "soft":
+    # Coefficient block: soft/weak modes are self-contained (epsilon unused), so they encode
+    # their own free-free parameters; WCA/LJ encode the free-free epsilons (eQQ/eFF/eQF)
+    # exactly as before, so their filenames are byte-identical.
+    if config.potential_type == "soft":
         s = config.soft
         coeff = f"kQQ{fmt_num(s.k_QtQt)}_kFF{fmt_num(s.k_FtFt)}_kQF{fmt_num(s.k_QtFt)}"
+    elif config.potential_type == "weak":
+        w = config.weak
+        coeff = (f"kQQ{fmt_num(w.k_QtQt)}_kFF{fmt_num(w.k_FtFt)}_kQF{fmt_num(w.k_QtFt)}"
+                 f"_dQQ{fmt_num(w.depth_QtQt)}_dFF{fmt_num(w.depth_FtFt)}_dQF{fmt_num(w.depth_QtFt)}")
     else:
         coeff = (f"eQQ{fmt_num(lj.epsilon_QtQt)}_eFF{fmt_num(lj.epsilon_FtFt)}"
                  f"_eQF{fmt_num(lj.epsilon_QtFt)}")
 
     # Leading identity block, shared by single and phased runs.
-    prefix = f"{config.n_qt}Qt_{config.n_ft}Ft_{lj.potential_type}_{coeff}"
+    prefix = f"{config.n_qt}Qt_{config.n_ft}Ft_{config.potential_type}_{coeff}"
 
     # Additive tag so monovalent-Ft runs don't collide with multivalent ones on disk.
     # Off by default => suffix absent => existing folder/file names are unchanged.

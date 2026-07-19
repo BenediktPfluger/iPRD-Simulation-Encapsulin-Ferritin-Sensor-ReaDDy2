@@ -75,13 +75,21 @@ a free Ft. Qt stays multivalent. Default `False` reproduces the original multiva
   `k = 0` disables a pair). No attractive term. Soft mode is self-contained — `lj.epsilon_*` is
   **ignored** in soft mode. Because overlaps produce small finite forces (not an `r⁻¹²` blow-up),
   a far larger stable `dt` is possible.
+- **Weak interaction, piecewise-harmonic** (`potential_type="weak"`) is a fourth mode: ReaDDy's
+  `add_weak_interaction_piecewise_harmonic` — a *soft attractive* pair potential (harmonic
+  repulsive branch + an attractive well of depth `depth` whose minimum sits at contact
+  `r_i + r_j`, returning to 0 at `cutoff`). It gives LJ-like attraction **without** the `r⁻¹²`
+  wall, so it runs at a much larger `dt` than 12-6 LJ. Per-pair force constants `weak.k_*` and
+  well depths `weak.depth_*` (both cascade like the LJ ε; `k = 0` disables a pair);
+  `cutoff = weak.cutoff_factor × contact`. Self-contained — `lj.epsilon_*` is ignored in weak
+  mode.
 - **Harmonic bonds** (`k_bond`) hold bonded particles inside a cluster at equilibrium length
   `r_Qt + r_Ft`.
 
 **Equilibration vs production.** Equilibration runs with **reactions disabled** and a
 purely-repulsive **WCA** potential (the `equilibration_potential` config field, default
 `"WCA"`) to relax initial random positions without attraction; production then switches on
-attractions (LJ via `lj.potential_type`) and the binding reactions. This split is handled by
+attractions (LJ via `config.potential_type`) and the binding reactions. This split is handled by
 `equilibrate_system()` + `run_simulation()`. Set `equilibration_potential="LJ"` to equilibrate
 under the full attractive potential instead. `equilibration_potential` (and each phase's
 `potential_type`) also accepts `"soft"`; in soft mode equilibration is optional altogether
@@ -163,10 +171,8 @@ config = sim.SimulationConfig(
     qt=sim.ParticleConfig("Qt", radius=21.0, diffusion=0.5, cluster_diffusion=0.3),
     ft=sim.ParticleConfig("Ft", radius=6.0, diffusion=1.0, cluster_diffusion=0.7),
     topology=sim.TopologyConfig(binding_radius=27.25, kon=0.001, k_bond=10.0),
-    lj=sim.LennardJonesConfig(
-        epsilon_QtQt=1.5, epsilon_FtFt=1.5, epsilon_QtFt=3.0,
-        potential_type="LJ",
-    ),
+    potential_type="LJ",        # top-level selector: "WCA" | "LJ" | "soft" | "weak"
+    lj=sim.LennardJonesConfig(epsilon_QtQt=1.5, epsilon_FtFt=1.5, epsilon_QtFt=3.0),
     box_size=(500.0, 500.0, 500.0),
     temperature=300.0,
     timestep=0.05,        # ns  (=50 ps)
@@ -222,8 +228,10 @@ values — see the footnote.
 | `topology.koff` | bond-breaking rate per edge (deagglomeration phases only) | 1/ns | 0.0 |
 | `phases` | optional list of `PhaseConfig` for agglomeration↔deagglomeration cycling; `None` = single run | – | `None` |
 | `lj.epsilon_QtQt/FtFt/QtFt` | well depths for the three free pairs (in soft mode: on/off gates only) | kJ/mol | 1.5 / 1.5 / 3.0 |
-| `lj.potential_type` | `"WCA"` (repulsive), `"LJ"` (attractive), or `"soft"` (harmonic repulsion, [§12](#12-soft-mode--reaching-larger-timesteps)) | – | `LJ` for production |
+| `potential_type` | **top-level** production selector: `"WCA"` (repulsive), `"LJ"` (attractive), `"soft"` (harmonic repulsion, [§12](#12-soft-mode--reaching-larger-timesteps)), or `"weak"` (piecewise-harmonic weak interaction). Picks which block is registered (`lj.epsilon_*` / `soft.k_*` / `weak.k_*,depth_*`); the others are ignored | – | `LJ` for production |
 | `soft.k_QtQt/k_FtFt/k_QtFt` | per-pair harmonic-repulsion stiffness (free-free; cluster/mixed cascade), used only when `potential_type="soft"`; `k=0` disables a pair | kJ/(mol·nm²) | calibrate ([§12](#12-soft-mode--reaching-larger-timesteps)) |
+| `weak.k_QtQt/…` / `weak.depth_QtQt/…` | per-pair force constant + well depth for `potential_type="weak"` (free-free; cluster/mixed cascade); `k=0` disables a pair | kJ/(mol·nm²), kJ/mol | calibrate |
+| `weak.cutoff_factor` | weak-mode cutoff as a multiple of contact (`cutoff = factor × (r_i+r_j)`, must be > 1) | – | 2.0 |
 | `box_size` | cubic box edge | nm | (500, 500, 500) |
 | `temperature` | – | K | 300 |
 | `equilibration_potential` | potential during equilibration (`"WCA"`, `"LJ"`, or `"soft"`); reactions always off | – | `WCA` |
@@ -483,7 +491,7 @@ here rather than silently fixed:
 
 Production runs use stiff 12-6 Lennard-Jones, whose `r⁻¹²` wall turns any particle overlap
 into an enormous force and so forces a very small timestep (50 ps) for EulerBD stability.
-**Soft mode** (`lj.potential_type="soft"`) replaces that wall with **harmonic repulsion**
+**Soft mode** (`potential_type="soft"`) replaces that wall with **harmonic repulsion**
 (ReaDDy's `add_harmonic_repulsion`): a bounded, linear force that vanishes at the contact
 distance `r_i + r_j`. Overlaps then produce small finite forces instead of a blow-up, so a
 much larger `dt` is numerically stable. This mirrors the approach of Arkfeld et al.,
@@ -493,7 +501,7 @@ which reaches minute-scale simulated time with millisecond timesteps.
 
 There is **no attractive term** in soft mode — clustering comes purely from the topology
 binding reactions + harmonic bonds (unchanged). Soft mode is **self-contained**: it reads only
-`config.soft.*` and **ignores `lj.epsilon_*`** entirely (only `lj.potential_type` still selects
+`config.soft.*` and **ignores `lj.epsilon_*`** entirely (only `config.potential_type` selects
 the mode). Each pair has its **own** force constant `soft.k_*` (kJ/(mol·nm²)), so you can stiffen
 the small-particle pairs to stop them overlapping. The thermal overlap scale is
 `δ ≈ √(2·kᵦT / k)`, so a value soft enough for a large `dt` lets small particles interpenetrate —
@@ -506,7 +514,7 @@ config = sim.SimulationConfig(
     qt=sim.ParticleConfig("Qt", radius=21.0, diffusion=0.05, cluster_diffusion=0.03),
     ft=sim.ParticleConfig("Ft", radius=6.0,  diffusion=0.1,  cluster_diffusion=0.07),
     topology=sim.TopologyConfig(binding_radius=27.25, kon=0.01, k_bond=0.5),
-    lj=sim.LennardJonesConfig(potential_type="soft"),   # <- select soft mode (epsilons ignored)
+    potential_type="soft",   # <- top-level selector (epsilons/lj ignored in soft mode)
     soft=sim.SoftPotentialConfig(k_QtQt=0.2, k_FtFt=1.0, k_QtFt=0.5),  # stiffer for small Ft
     box_size=(500.0, 500.0, 500.0), timestep=0.5, n_steps=...,
 )

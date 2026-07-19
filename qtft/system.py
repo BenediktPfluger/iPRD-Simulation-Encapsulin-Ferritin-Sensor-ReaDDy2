@@ -55,7 +55,7 @@ def create_system(
         (phase.potential_type), spatial binding reactions iff phase.binding, and bond
         breaking (dissociation + freed-monomer re-typing) iff phase.breaking. When None,
         the system is the ordinary single-run production system (binding on, no breaking,
-        production potential config.lj.potential_type).
+        production potential config.potential_type).
 
     Returns
     -------
@@ -143,20 +143,19 @@ def _add_potentials(
     Parameters
     ----------
     potential_type : str, optional
-        Override for the potential type ("WCA", "LJ", or "soft"). If None, uses
-        config.lj.potential_type / config.lj.cutoff_factor (production). When set
-        (e.g. "WCA" for equilibration), the geometry is derived from that type
-        while the same per-pair epsilon gates are kept.
+        Override for the potential type ("WCA", "LJ", "soft", or "weak"). If None, uses
+        config.potential_type (production). When set (e.g. "WCA" for equilibration, or a
+        phase's potential_type), that mode is registered instead.
     """
     lj = config.lj
 
-    # Resolve the effective potential type. Production passes None -> use config default;
-    # equilibration/phase pass an explicit override.
-    resolved_from_none = potential_type is None
-    if resolved_from_none:
-        potential_type = lj.potential_type
-    if potential_type not in ("WCA", "LJ", "soft"):
-        raise ValueError(f"potential_type must be 'WCA', 'LJ', or 'soft', got: {potential_type}")
+    # Resolve the effective potential type. Production passes None -> use the top-level
+    # config.potential_type selector; equilibration/phase pass an explicit override.
+    if potential_type is None:
+        potential_type = config.potential_type
+    if potential_type not in ("WCA", "LJ", "soft", "weak"):
+        raise ValueError(
+            f"potential_type must be 'WCA', 'LJ', 'soft', or 'weak', got: {potential_type}")
 
     qt = config.qt.name
     ft = config.ft.name
@@ -193,10 +192,36 @@ def _add_potentials(
                 interaction_distance=float(distances[geomkey]),
             )
             n_registered += 1
+    elif potential_type == "weak":
+        # Piecewise-harmonic weak interaction: soft attractive well of depth `depth` with
+        # its minimum at the contact distance r_i+r_j, returning to 0 at cutoff. LJ-like
+        # attraction without the r^-12 wall. Self-contained: reads only config.weak.
+        weak = config.weak
+        distances = {
+            "qq": 2.0 * config.qt.radius,
+            "ff": 2.0 * config.ft.radius,
+            "qf": config.qt.radius + config.ft.radius,
+        }
+
+        def add_pair(t1, t2, suffix, geomkey):
+            nonlocal n_registered, n_skipped
+            k = float(getattr(weak, "k_" + suffix))
+            if k == 0:
+                n_skipped += 1
+                return
+            d = float(distances[geomkey])
+            system.potentials.add_weak_interaction_piecewise_harmonic(
+                t1, t2,
+                force_constant=k,
+                desired_distance=d,
+                depth=float(getattr(weak, "depth_" + suffix)),
+                cutoff=float(weak.cutoff_factor * d),
+            )
+            n_registered += 1
     else:
-        # 12-6 Lennard-Jones truncated at cf*sigma. cf differs by mode; for the None
-        # (production) path keep config.lj.cutoff_factor so a user override is honored.
-        if resolved_from_none:
+        # 12-6 Lennard-Jones truncated at cf*sigma. The cutoff factor is derived from the
+        # mode (WCA -> 2^(1/6), LJ -> 2.5), unless the user set an explicit lj.cutoff_factor.
+        if lj.cutoff_factor is not None:
             cf = lj.cutoff_factor
         elif potential_type == "WCA":
             cf = lj.WCA_CUTOFF_FACTOR
@@ -248,6 +273,11 @@ def _add_potentials(
         s = config.soft
         logger.info(f"✓ soft (harmonic-repulsion) potentials ({n_registered} registered"
                     f"{skip_str}): k_QQ={s.k_QtQt}, k_FF={s.k_FtFt}, k_QF={s.k_QtFt}")
+    elif potential_type == "weak":
+        w = config.weak
+        logger.info(f"✓ weak (piecewise-harmonic) potentials ({n_registered} registered"
+                    f"{skip_str}): k_QQ={w.k_QtQt}, k_FF={w.k_FtFt}, k_QF={w.k_QtFt}; "
+                    f"depth_QQ={w.depth_QtQt}, depth_FF={w.depth_FtFt}, depth_QF={w.depth_QtFt}")
     else:
         logger.info(f"✓ {potential_type} potentials ({n_registered} registered{skip_str}): "
                     f"ε_QQ={lj.epsilon_QtQt}, ε_FF={lj.epsilon_FtFt}, ε_QF={lj.epsilon_QtFt}")

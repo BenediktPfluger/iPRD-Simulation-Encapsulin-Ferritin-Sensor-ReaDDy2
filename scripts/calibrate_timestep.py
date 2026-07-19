@@ -108,7 +108,7 @@ def positions_all_finite(h5_file, config, stride=1):
 def evaluate_cell(base_config, dt_ns, d_scale, stage_dir, run_kwargs, p_target=0.1):
     """Run one (dt, diffusion-scale) cell and return a metrics dict."""
     cfg = qtft.SimulationConfig.from_dict(base_config.to_dict())
-    cfg.lj.potential_type = "soft"
+    cfg.potential_type = "soft"
     cfg.timestep = dt_ns
     # Scale diffusion (free + cluster) by d_scale.
     for pc in (cfg.qt, cfg.ft):
@@ -316,12 +316,12 @@ def main():
             qt=qtft.ParticleConfig("Qt", radius=21.0, diffusion=0.5, cluster_diffusion=0.3),
             ft=qtft.ParticleConfig("Ft", radius=6.0, diffusion=1.0, cluster_diffusion=0.7),
             topology=qtft.TopologyConfig(binding_radius=27.25, kon=0.01, k_bond=10.0),
-            lj=qtft.LennardJonesConfig(epsilon_QtQt=1.5, epsilon_FtFt=1.5, epsilon_QtFt=3.0,
-                                       potential_type="soft"),
+            potential_type="soft",
+            lj=qtft.LennardJonesConfig(epsilon_QtQt=1.5, epsilon_FtFt=1.5, epsilon_QtFt=3.0),
             box_size=(args.box, args.box, args.box),
         )
     # Apply CLI overrides.
-    base.lj.potential_type = "soft"
+    base.potential_type = "soft"
     if args.qt_diffusion is not None:
         base.qt.diffusion = args.qt_diffusion
     if args.ft_diffusion is not None:
