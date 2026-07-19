@@ -129,43 +129,35 @@ def _add_potentials(
     config: SimulationConfig,
     potential_type: Optional[str] = None,
 ):
-    """Add Lennard-Jones potentials to the system.
+    """Add the excluded-volume pair potentials to the system.
 
-    Uses per-pair epsilon values from config.lj. Pairs with epsilon=0
-    are skipped (interaction disabled).
+    Two families, selected by potential_type:
+      - "WCA"/"LJ": 12-6 Lennard-Jones truncated at cf*sigma (WCA = purely repulsive,
+        LJ = attractive well). sigma places the minimum/exclusion at contact r_i+r_j.
+        Per-pair magnitude + on/off gate is config.lj.epsilon_* (epsilon == 0 skips a pair).
+      - "soft": per-pair harmonic repulsion from config.soft.k_* (a bounded linear force
+        that vanishes at the contact distance r_i+r_j; no attractive term, no cutoff;
+        enables a much larger stable timestep). Self-contained: config.lj.epsilon_* is
+        NOT read in soft mode; k == 0 skips a pair.
 
     Parameters
     ----------
     potential_type : str, optional
-        Override for the potential type ("WCA" or "LJ"). If None, uses
+        Override for the potential type ("WCA", "LJ", or "soft"). If None, uses
         config.lj.potential_type / config.lj.cutoff_factor (production). When set
-        (e.g. "WCA" for equilibration), the cutoff factor is derived from that type
-        while the same per-pair epsilon values are kept.
+        (e.g. "WCA" for equilibration), the geometry is derived from that type
+        while the same per-pair epsilon gates are kept.
     """
     lj = config.lj
 
-    # Resolve potential type and cutoff factor (production vs equilibration override)
-    if potential_type is None:
+    # Resolve the effective potential type. Production passes None -> use config default;
+    # equilibration/phase pass an explicit override.
+    resolved_from_none = potential_type is None
+    if resolved_from_none:
         potential_type = lj.potential_type
-        cf = lj.cutoff_factor
-    elif potential_type == "WCA":
-        cf = lj.WCA_CUTOFF_FACTOR
-    elif potential_type == "LJ":
-        cf = lj.LJ_CUTOFF_FACTOR
-    else:
-        raise ValueError(f"potential_type must be 'WCA' or 'LJ', got: {potential_type}")
+    if potential_type not in ("WCA", "LJ", "soft"):
+        raise ValueError(f"potential_type must be 'WCA', 'LJ', or 'soft', got: {potential_type}")
 
-    # Calculate sigma values. σ = (r_i+r_j)/2^(1/6) puts the LJ minimum / WCA
-    # exclusion at the contact distance r_i+r_j (= bond length); see _SIGMA_AT_CONTACT.
-    sigma_qq = 2.0 * config.qt.radius * _SIGMA_AT_CONTACT
-    sigma_ff = 2.0 * config.ft.radius * _SIGMA_AT_CONTACT
-    sigma_qf = (config.qt.radius + config.ft.radius) * _SIGMA_AT_CONTACT
-
-    # Calculate cutoffs
-    cutoff_qq = cf * sigma_qq
-    cutoff_ff = cf * sigma_ff
-    cutoff_qf = cf * sigma_qf
-    
     qt = config.qt.name
     ft = config.ft.name
     qtc = config.qt.cluster_name
@@ -173,42 +165,92 @@ def _add_potentials(
 
     n_registered = 0
     n_skipped = 0
-    
-    def add_lj(t1, t2, epsilon, sigma, cutoff):
-        nonlocal n_registered, n_skipped
-        if epsilon == 0:
-            n_skipped += 1
-            return
-        system.potentials.add_lennard_jones(
-            t1, t2, m=12, n=6,
-            epsilon=float(epsilon), sigma=float(sigma), cutoff=float(cutoff)
-        )
-        n_registered += 1
-    
-    # All 10 possible pairwise interactions with per-pair epsilon values
-    # Free-free pairs
-    add_lj(qt,  qt,  lj.epsilon_QtQt,   sigma_qq, cutoff_qq)
-    add_lj(ft,  ft,  lj.epsilon_FtFt,   sigma_ff, cutoff_ff)
-    add_lj(qt,  ft,  lj.epsilon_QtFt,   sigma_qf, cutoff_qf)
-    
-    # Cluster-cluster pairs (same species)
-    add_lj(qtc, qtc, lj.epsilon_QtCQtC,  sigma_qq, cutoff_qq)
-    add_lj(ftc, ftc, lj.epsilon_FtCFtC,  sigma_ff, cutoff_ff)
-    
-    # Cluster-cluster (cross-species)
-    add_lj(qtc, ftc, lj.epsilon_QtCFtC,  sigma_qf, cutoff_qf)
-    
-    # Mixed-state pairs (same species: one free, one clustered)
-    add_lj(qt,  qtc, lj.epsilon_QtQtC,   sigma_qq, cutoff_qq)
-    add_lj(ft,  ftc, lj.epsilon_FtFtC,   sigma_ff, cutoff_ff)
-    
-    # Mixed-state pairs (cross-species: one clustered, one free)
-    add_lj(qtc, ft,  lj.epsilon_QtCFt,   sigma_qf, cutoff_qf)
-    add_lj(qt,  ftc, lj.epsilon_QtFtC,   sigma_qf, cutoff_qf)
-    
+
+    # Build a per-pair registration helper `add_pair(t1, t2, suffix, geomkey)` where suffix
+    # is the pair's field name (e.g. "QtQt") and geomkey is "qq" (Qt-family same), "ff"
+    # (Ft-family same) or "qf" (cross). Each branch looks up its own per-pair coefficient
+    # by suffix and uses it as both the magnitude and the on/off gate (0 => skip).
+    if potential_type == "soft":
+        # Harmonic repulsion: bounded linear force vanishing at the contact distance
+        # r_i+r_j. No attractive term, no cutoff -> tolerant of overlaps, large-dt stable.
+        # Self-contained: reads only config.soft (lj.epsilon is ignored in soft mode).
+        soft = config.soft
+        distances = {
+            "qq": 2.0 * config.qt.radius,
+            "ff": 2.0 * config.ft.radius,
+            "qf": config.qt.radius + config.ft.radius,
+        }
+
+        def add_pair(t1, t2, suffix, geomkey):
+            nonlocal n_registered, n_skipped
+            k = float(getattr(soft, "k_" + suffix))
+            if k == 0:
+                n_skipped += 1
+                return
+            system.potentials.add_harmonic_repulsion(
+                t1, t2,
+                force_constant=k,
+                interaction_distance=float(distances[geomkey]),
+            )
+            n_registered += 1
+    else:
+        # 12-6 Lennard-Jones truncated at cf*sigma. cf differs by mode; for the None
+        # (production) path keep config.lj.cutoff_factor so a user override is honored.
+        if resolved_from_none:
+            cf = lj.cutoff_factor
+        elif potential_type == "WCA":
+            cf = lj.WCA_CUTOFF_FACTOR
+        else:  # "LJ"
+            cf = lj.LJ_CUTOFF_FACTOR
+
+        # σ = (r_i+r_j)/2^(1/6) puts the LJ minimum / WCA exclusion at the contact
+        # distance r_i+r_j (= bond length); see _SIGMA_AT_CONTACT.
+        sigma = {
+            "qq": 2.0 * config.qt.radius * _SIGMA_AT_CONTACT,
+            "ff": 2.0 * config.ft.radius * _SIGMA_AT_CONTACT,
+            "qf": (config.qt.radius + config.ft.radius) * _SIGMA_AT_CONTACT,
+        }
+
+        def add_pair(t1, t2, suffix, geomkey):
+            nonlocal n_registered, n_skipped
+            epsilon = float(getattr(lj, "epsilon_" + suffix))
+            if epsilon == 0:
+                n_skipped += 1
+                return
+            s = sigma[geomkey]
+            system.potentials.add_lennard_jones(
+                t1, t2, m=12, n=6,
+                epsilon=epsilon, sigma=float(s), cutoff=float(cf * s),
+            )
+            n_registered += 1
+
+    # All 10 possible pairwise interactions: (type1, type2, field suffix, geom key).
+    pair_specs = [
+        # Free-free pairs
+        (qt,  qt,  "QtQt",   "qq"),
+        (ft,  ft,  "FtFt",   "ff"),
+        (qt,  ft,  "QtFt",   "qf"),
+        # Cluster-cluster pairs (same species) + cross-species
+        (qtc, qtc, "QtCQtC", "qq"),
+        (ftc, ftc, "FtCFtC", "ff"),
+        (qtc, ftc, "QtCFtC", "qf"),
+        # Mixed-state pairs (one free, one clustered)
+        (qt,  qtc, "QtQtC",  "qq"),
+        (ft,  ftc, "FtFtC",  "ff"),
+        (qtc, ft,  "QtCFt",  "qf"),
+        (qt,  ftc, "QtFtC",  "qf"),
+    ]
+    for t1, t2, suffix, geomkey in pair_specs:
+        add_pair(t1, t2, suffix, geomkey)
+
     skip_str = f", {n_skipped} disabled" if n_skipped > 0 else ""
-    logger.info(f"✓ {potential_type} potentials ({n_registered} registered{skip_str}): "
-                f"ε_QQ={lj.epsilon_QtQt}, ε_FF={lj.epsilon_FtFt}, ε_QF={lj.epsilon_QtFt}")
+    if potential_type == "soft":
+        s = config.soft
+        logger.info(f"✓ soft (harmonic-repulsion) potentials ({n_registered} registered"
+                    f"{skip_str}): k_QQ={s.k_QtQt}, k_FF={s.k_FtFt}, k_QF={s.k_QtFt}")
+    else:
+        logger.info(f"✓ {potential_type} potentials ({n_registered} registered{skip_str}): "
+                    f"ε_QQ={lj.epsilon_QtQt}, ε_FF={lj.epsilon_FtFt}, ε_QF={lj.epsilon_QtFt}")
 
 
 def _add_topologies(

@@ -49,6 +49,62 @@ def _steps_to_us(steps: np.ndarray, timestep: float) -> np.ndarray:
     return np.asarray(steps) * timestep * NS_TO_US
 
 
+# Adaptive time-unit ladder: (label, nanoseconds per unit). Used to render durations in
+# whatever unit keeps the number in [1, 1000) (seconds uncapped), instead of always µs.
+# Conversion of steps -> time is unchanged (_steps_to_us); this is display/naming only.
+_TIME_UNITS = [("ps", 1e-3), ("ns", 1.0), ("µs", 1e3), ("ms", 1e6), ("s", 1e9)]
+
+
+def _pick_time_unit(ns: float):
+    """Return (label, ns_per_unit) for the largest unit whose ns_per_unit <= |ns|.
+
+    Keeps the displayed number in [1, 1000) for ps..ms; seconds is the top unit and is
+    left uncapped (e.g. 2000 s). Zero / sub-ps values fall back to picoseconds.
+    """
+    v = abs(float(ns))
+    chosen = _TIME_UNITS[0]
+    for label, nspu in _TIME_UNITS:
+        if v >= nspu:
+            chosen = (label, nspu)
+    return chosen
+
+
+def format_duration(ns: float, ascii: bool = False) -> str:
+    """Format a duration given in nanoseconds with an appropriate SI unit.
+
+    The unit is chosen from the magnitude (ps, ns, µs, ms, s) so the number stays in a
+    readable range. The number is formatted compactly (no trailing zeros).
+
+    Parameters
+    ----------
+    ns : float
+        Duration in nanoseconds.
+    ascii : bool
+        If True, use "us" instead of "µs" and omit the space between number and unit —
+        suitable for filenames (e.g. "50ps", "100us", "1ms", "300s"). If False, return a
+        human-readable string with a space and the unicode µ (e.g. "100 µs", "5 ms").
+    """
+    label, nspu = _pick_time_unit(ns)
+    value = float(ns) / nspu
+    num = f"{value:g}"
+    if ascii:
+        label = "us" if label == "µs" else label
+        return f"{num}{label}"
+    return f"{num} {label}"
+
+
+def choose_time_unit(max_us: float):
+    """Pick a display unit for a time axis given in microseconds.
+
+    Returns (factor, label): multiply a µs value/array by ``factor`` to convert it into
+    the chosen unit, and use ``label`` (e.g. "µs", "ms", "s") for the axis. The unit is
+    selected from ``max_us`` so the axis numbers stay readable.
+    """
+    label, nspu = _pick_time_unit(abs(float(max_us)) * 1e3)  # µs -> ns for the ladder
+    factor = 1e3 / nspu  # µs -> chosen unit
+    return factor, label
+
+
 @dataclass
 class ParticleConfig:
     """
@@ -173,9 +229,10 @@ class PhaseConfig:
     def __post_init__(self):
         if self.n_steps <= 0:
             raise ValueError(f"Phase '{self.name}' n_steps must be positive: {self.n_steps}")
-        if self.potential_type not in ("WCA", "LJ"):
+        if self.potential_type not in ("WCA", "LJ", "soft"):
             raise ValueError(
-                f"Phase '{self.name}' potential_type must be 'WCA' or 'LJ', got: {self.potential_type}"
+                f"Phase '{self.name}' potential_type must be 'WCA', 'LJ', or 'soft', "
+                f"got: {self.potential_type}"
             )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -337,8 +394,14 @@ class LennardJonesConfig:
                 self.cutoff_factor = self.WCA_CUTOFF_FACTOR
             elif self.potential_type == "LJ":
                 self.cutoff_factor = self.LJ_CUTOFF_FACTOR
+            elif self.potential_type == "soft":
+                # Harmonic repulsion has no cutoff (it uses an interaction_distance);
+                # store a positive placeholder so _validate's cutoff_factor > 0 passes.
+                self.cutoff_factor = self.WCA_CUTOFF_FACTOR
             else:
-                raise ValueError(f"Unknown potential_type: {self.potential_type}. Use 'WCA' or 'LJ'.")
+                raise ValueError(
+                    f"Unknown potential_type: {self.potential_type}. Use 'WCA', 'LJ', or 'soft'."
+                )
         
         self._validate()
     
@@ -362,8 +425,10 @@ class LennardJonesConfig:
         
         if self.cutoff_factor <= 0:
             raise ValueError(f"Cutoff factor must be positive: {self.cutoff_factor}")
-        if self.potential_type not in ("WCA", "LJ"):
-            raise ValueError(f"potential_type must be 'WCA' or 'LJ', got: {self.potential_type}")
+        if self.potential_type not in ("WCA", "LJ", "soft"):
+            raise ValueError(
+                f"potential_type must be 'WCA', 'LJ', or 'soft', got: {self.potential_type}"
+            )
     
     def get_epsilon(self, type1: str, type2: str) -> float:
         """
@@ -397,7 +462,130 @@ class LennardJonesConfig:
         
         if pair not in pair_map:
             raise ValueError(f"Unknown particle pair: {type1}-{type2}")
-        
+
+        return pair_map[pair]
+
+
+@dataclass
+class SoftPotentialConfig:
+    """
+    Configuration for the "soft" excluded-volume mode (per-pair harmonic repulsion).
+
+    Selected via ``lj.potential_type == "soft"`` (or per-phase / equilibration).
+    Instead of a stiff 12-6 Lennard-Jones wall, each enabled type pair gets a
+    ReaDDy ``add_harmonic_repulsion`` potential: force is linear and bounded, and
+    vanishes at the contact distance (r_i + r_j). Because overlaps produce small
+    finite forces rather than an r^-12 blow-up, a much larger integration timestep
+    is numerically stable. There is no attractive term — clustering comes purely
+    from the topology binding reactions + harmonic bonds, which are unchanged.
+
+    Soft mode is fully self-contained: when active, ``_add_potentials`` reads ONLY
+    these force constants (``LennardJonesConfig.epsilon_*`` is ignored). Each pair
+    has its own constant ``k_*`` (kJ/(mol*nm^2)); the thermal overlap scale is
+    ``sqrt(2*kB*T / k)``, so stiffen the small-particle pairs (Ft-Ft, Qt-Ft) to
+    stop them interpenetrating. Setting any ``k`` to 0 disables that pair entirely
+    (the potential is not registered) — the soft-mode analog of ``epsilon == 0``.
+
+    Force constants follow the same cascade hierarchy as ``LennardJonesConfig``:
+
+    1. Free-free pairs (always explicit): k_QtQt, k_FtFt, k_QtFt
+    2. Cluster pairs (default to their free-particle counterparts):
+       k_QtCQtC<-k_QtQt, k_FtCFtC<-k_FtFt, k_QtCFtC<-k_QtFt
+    3. Mixed-state pairs (default to the cluster value for that species pair):
+       k_QtQtC<-k_QtCQtC, k_FtFtC<-k_FtCFtC, k_QtCFt<-k_QtCFtC, k_QtFtC<-k_QtCFtC
+
+    Keep the constants soft enough that they do not reintroduce the stiffness that
+    forces a tiny timestep; the stable upper bound is measured by
+    scripts/calibrate_timestep.py.
+    """
+    # Primary free-free force constants (kJ/(mol*nm^2)); 0 disables that pair.
+    k_QtQt: float = 10.0
+    k_FtFt: float = 10.0
+    k_QtFt: float = 10.0
+
+    # Cluster force constants (cascade from free-free)
+    k_QtCQtC: Optional[float] = None
+    k_FtCFtC: Optional[float] = None
+    k_QtCFtC: Optional[float] = None
+
+    # Mixed-state force constants (cascade from cluster)
+    k_QtQtC: Optional[float] = None
+    k_FtFtC: Optional[float] = None
+    k_QtCFt: Optional[float] = None
+    k_QtFtC: Optional[float] = None
+
+    def __post_init__(self):
+        # Cascade defaults: cluster values from free-free values
+        if self.k_QtCQtC is None:
+            self.k_QtCQtC = self.k_QtQt
+        if self.k_FtCFtC is None:
+            self.k_FtCFtC = self.k_FtFt
+        if self.k_QtCFtC is None:
+            self.k_QtCFtC = self.k_QtFt
+
+        # Cascade defaults: mixed-state values from cluster values
+        if self.k_QtQtC is None:
+            self.k_QtQtC = self.k_QtCQtC
+        if self.k_FtFtC is None:
+            self.k_FtFtC = self.k_FtCFtC
+        if self.k_QtCFt is None:
+            self.k_QtCFt = self.k_QtCFtC
+        if self.k_QtFtC is None:
+            self.k_QtFtC = self.k_QtCFtC
+
+        self._validate()
+
+    def _validate(self):
+        # All force constants must be non-negative (0 = disabled)
+        k_pairs = {
+            "k_QtQt": self.k_QtQt,
+            "k_FtFt": self.k_FtFt,
+            "k_QtFt": self.k_QtFt,
+            "k_QtCQtC": self.k_QtCQtC,
+            "k_FtCFtC": self.k_FtCFtC,
+            "k_QtCFtC": self.k_QtCFtC,
+            "k_QtQtC": self.k_QtQtC,
+            "k_FtFtC": self.k_FtFtC,
+            "k_QtCFt": self.k_QtCFt,
+            "k_QtFtC": self.k_QtFtC,
+        }
+        for name, val in k_pairs.items():
+            if val < 0:
+                raise ValueError(f"{name} must be non-negative, got {val}")
+
+    def get_force_constant(self, type1: str, type2: str) -> float:
+        """
+        Get the harmonic-repulsion force constant for a pair of particle types.
+
+        Parameters
+        ----------
+        type1, type2 : str
+            Particle type names (e.g., "Qt", "Ft", "QtC", "FtC")
+
+        Returns
+        -------
+        float
+            Force constant (kJ/(mol*nm^2)) for this pair (0 = disabled).
+        """
+        # Normalize pair order (alphabetical)
+        pair = tuple(sorted([type1, type2]))
+
+        pair_map = {
+            ("Ft", "Ft"): self.k_FtFt,
+            ("Ft", "FtC"): self.k_FtFtC,
+            ("Ft", "Qt"): self.k_QtFt,
+            ("Ft", "QtC"): self.k_QtCFt,
+            ("FtC", "FtC"): self.k_FtCFtC,
+            ("FtC", "Qt"): self.k_QtFtC,
+            ("FtC", "QtC"): self.k_QtCFtC,
+            ("Qt", "Qt"): self.k_QtQt,
+            ("Qt", "QtC"): self.k_QtQtC,
+            ("QtC", "QtC"): self.k_QtCQtC,
+        }
+
+        if pair not in pair_map:
+            raise ValueError(f"Unknown particle pair: {type1}-{type2}")
+
         return pair_map[pair]
 
 
@@ -455,7 +643,11 @@ class SimulationConfig:
     
     # Lennard-Jones configuration
     lj: LennardJonesConfig = field(default_factory=LennardJonesConfig)
-    
+
+    # Soft (harmonic-repulsion) configuration, used when potential_type == "soft".
+    # Ignored by the WCA/LJ paths, so existing configs are unaffected.
+    soft: SoftPotentialConfig = field(default_factory=SoftPotentialConfig)
+
     # Simulation box
     box_size: Tuple[float, float, float] = (50.0, 50.0, 50.0)
     periodic_boundary: bool = True
@@ -543,9 +735,10 @@ class SimulationConfig:
             raise ValueError(f"Timestep must be positive: {self.timestep}")
 
         # Check equilibration potential
-        if self.equilibration_potential not in ("WCA", "LJ"):
+        if self.equilibration_potential not in ("WCA", "LJ", "soft"):
             raise ValueError(
-                f"equilibration_potential must be 'WCA' or 'LJ', got: {self.equilibration_potential}"
+                f"equilibration_potential must be 'WCA', 'LJ', or 'soft', "
+                f"got: {self.equilibration_potential}"
             )
         
         # Check counts
@@ -706,6 +899,7 @@ class SimulationConfig:
         ftp = params.get("ft", {})
         topop = params.get("topology", {})
         ljp = params.get("lj", {})
+        softp = params.get("soft", {})
 
         def g(sub, key, default, flat_key):
             return sub.get(key, default) if is_nested else params.get(flat_key, default)
@@ -744,6 +938,24 @@ class SimulationConfig:
             potential_type=g(ljp, "potential_type", "WCA", "potential_type"),
             cutoff_factor=g(ljp, "cutoff_factor", None, "cutoff_factor"),
         )
+        # Backward-compat: soft configs written before per-pair support stored a single
+        # `repulsion_force_constant`. Map it onto the three free-free constants on load so
+        # old soft config JSONs still round-trip faithfully (cluster/mixed then cascade).
+        legacy_k = softp.get("repulsion_force_constant") if is_nested \
+            else params.get("repulsion_force_constant")
+        free_default = 10.0 if legacy_k is None else legacy_k
+        soft = SoftPotentialConfig(
+            k_QtQt=g(softp, "k_QtQt", free_default, "k_QtQt"),
+            k_FtFt=g(softp, "k_FtFt", free_default, "k_FtFt"),
+            k_QtFt=g(softp, "k_QtFt", free_default, "k_QtFt"),
+            k_QtCQtC=g(softp, "k_QtCQtC", None, "k_QtCQtC"),
+            k_FtCFtC=g(softp, "k_FtCFtC", None, "k_FtCFtC"),
+            k_QtCFtC=g(softp, "k_QtCFtC", None, "k_QtCFtC"),
+            k_QtQtC=g(softp, "k_QtQtC", None, "k_QtQtC"),
+            k_FtFtC=g(softp, "k_FtFtC", None, "k_FtFtC"),
+            k_QtCFt=g(softp, "k_QtCFt", None, "k_QtCFt"),
+            k_QtFtC=g(softp, "k_QtFtC", None, "k_QtFtC"),
+        )
 
         # Handle box_size - convert list to tuple if needed
         box_size = params.get("box_size", (50.0, 50.0, 50.0))
@@ -760,6 +972,7 @@ class SimulationConfig:
             ft=ft,
             topology=topology,
             lj=lj,
+            soft=soft,
             box_size=box_size,
             periodic_boundary=params.get("periodic_boundary", True),
             temperature=params.get("temperature", 300.0),
@@ -823,6 +1036,19 @@ class SimulationConfig:
                 "potential_type": self.lj.potential_type,
                 "cutoff_factor": self.lj.cutoff_factor,
             },
+            # Nested soft (harmonic-repulsion) config (resolved per-pair values, not None)
+            "soft": {
+                "k_QtQt": self.soft.k_QtQt,
+                "k_FtFt": self.soft.k_FtFt,
+                "k_QtFt": self.soft.k_QtFt,
+                "k_QtCQtC": self.soft.k_QtCQtC,
+                "k_FtCFtC": self.soft.k_FtCFtC,
+                "k_QtCFtC": self.soft.k_QtCFtC,
+                "k_QtQtC": self.soft.k_QtQtC,
+                "k_FtFtC": self.soft.k_FtFtC,
+                "k_QtCFt": self.soft.k_QtCFt,
+                "k_QtFtC": self.soft.k_QtFtC,
+            },
             # Simulation parameters
             "box_size": list(self.box_size),  # Convert tuple to list for JSON
             "periodic_boundary": self.periodic_boundary,
@@ -885,6 +1111,17 @@ class SimulationConfig:
             "epsilon_QtFtC": self.lj.epsilon_QtFtC,
             "potential_type": self.lj.potential_type,
             "cutoff_factor": self.lj.cutoff_factor,
+            # Soft (harmonic-repulsion) per-pair force constants
+            "k_QtQt": self.soft.k_QtQt,
+            "k_FtFt": self.soft.k_FtFt,
+            "k_QtFt": self.soft.k_QtFt,
+            "k_QtCQtC": self.soft.k_QtCQtC,
+            "k_FtCFtC": self.soft.k_FtCFtC,
+            "k_QtCFtC": self.soft.k_QtCFtC,
+            "k_QtQtC": self.soft.k_QtQtC,
+            "k_FtFtC": self.soft.k_FtFtC,
+            "k_QtCFt": self.soft.k_QtCFt,
+            "k_QtFtC": self.soft.k_QtFtC,
             # Simulation parameters
             "box_size": self.box_size,
             "periodic_boundary": self.periodic_boundary,
@@ -924,63 +1161,103 @@ class SimulationConfig:
         print(f"  Bond-breaking rate (koff): {self.topology.koff} /(edge·ns)")
         print(f"  Bond stiffness: {self.topology.k_bond} kJ/(mol·nm²)")
         print(f"  Equilibrium bond length: {self.equilibrium_bond_length} nm")
-        print(f"\nLennard-Jones:")
-        print(f"  Potential type: {self.lj.potential_type}")
-        print(f"  Cutoff factor: {self.lj.cutoff_factor:.3f}")
-        lj = self.lj
-        print(f"  ε Qt-Qt: {lj.epsilon_QtQt} kJ/mol", end="")
-        if lj.epsilon_QtCQtC == 0:
-            print(f"  (QtC-QtC: disabled)", end="")
-        elif lj.epsilon_QtCQtC != lj.epsilon_QtQt:
-            print(f"  (QtC-QtC: {lj.epsilon_QtCQtC})", end="")
-        print()
-        print(f"  ε Ft-Ft: {lj.epsilon_FtFt} kJ/mol", end="")
-        if lj.epsilon_FtCFtC == 0:
-            print(f"  (FtC-FtC: disabled)", end="")
-        elif lj.epsilon_FtCFtC != lj.epsilon_FtFt:
-            print(f"  (FtC-FtC: {lj.epsilon_FtCFtC})", end="")
-        print()
-        print(f"  ε Qt-Ft: {lj.epsilon_QtFt} kJ/mol", end="")
-        if lj.epsilon_QtCFtC == 0:
-            print(f"  (QtC-FtC: disabled)", end="")
-        elif lj.epsilon_QtCFtC != lj.epsilon_QtFt:
-            print(f"  (QtC-FtC: {lj.epsilon_QtCFtC})", end="")
-        print()
-        # Show cluster/mixed-state summary if all defaults
-        all_cluster_default = (
-            lj.epsilon_QtCQtC == lj.epsilon_QtQt and
-            lj.epsilon_FtCFtC == lj.epsilon_FtFt and
-            lj.epsilon_QtCFtC == lj.epsilon_QtFt
-        )
-        all_mixed_default = (
-            lj.epsilon_QtQtC == lj.epsilon_QtCQtC and
-            lj.epsilon_FtFtC == lj.epsilon_FtCFtC and
-            lj.epsilon_QtCFt == lj.epsilon_QtCFtC and
-            lj.epsilon_QtFtC == lj.epsilon_QtCFtC
-        )
-        if all_cluster_default and all_mixed_default:
-            print(f"  Cluster/mixed ε: same as free (default)")
-        elif all_mixed_default:
-            print(f"  Mixed-state ε: same as cluster (default)")
+        if self.lj.potential_type == "soft":
+            # Soft mode is self-contained: show the per-pair repulsion constants; the LJ
+            # epsilon values are ignored entirely in this mode.
+            s = self.soft
+            print(f"\nSoft repulsion (harmonic):")
+            print(f"  Potential type: soft   (lj.epsilon ignored in soft mode)")
+            print(f"  k Qt-Qt: {s.k_QtQt} kJ/(mol·nm²)", end="")
+            if s.k_QtCQtC == 0:
+                print(f"  (QtC-QtC: disabled)", end="")
+            elif s.k_QtCQtC != s.k_QtQt:
+                print(f"  (QtC-QtC: {s.k_QtCQtC})", end="")
+            print()
+            print(f"  k Ft-Ft: {s.k_FtFt} kJ/(mol·nm²)", end="")
+            if s.k_FtCFtC == 0:
+                print(f"  (FtC-FtC: disabled)", end="")
+            elif s.k_FtCFtC != s.k_FtFt:
+                print(f"  (FtC-FtC: {s.k_FtCFtC})", end="")
+            print()
+            print(f"  k Qt-Ft: {s.k_QtFt} kJ/(mol·nm²)", end="")
+            if s.k_QtCFtC == 0:
+                print(f"  (QtC-FtC: disabled)", end="")
+            elif s.k_QtCFtC != s.k_QtFt:
+                print(f"  (QtC-FtC: {s.k_QtCFtC})", end="")
+            print()
+            all_cluster_default = (
+                s.k_QtCQtC == s.k_QtQt and s.k_FtCFtC == s.k_FtFt and s.k_QtCFtC == s.k_QtFt
+            )
+            all_mixed_default = (
+                s.k_QtQtC == s.k_QtCQtC and s.k_FtFtC == s.k_FtCFtC and
+                s.k_QtCFt == s.k_QtCFtC and s.k_QtFtC == s.k_QtCFtC
+            )
+            if all_cluster_default and all_mixed_default:
+                print(f"  Cluster/mixed k: same as free (default)")
+            elif all_mixed_default:
+                print(f"  Mixed-state k: same as cluster (default)")
+            else:
+                print(f"  Mixed-state k: Qt-QtC={s.k_QtQtC}, Ft-FtC={s.k_FtFtC}, "
+                      f"QtC-Ft={s.k_QtCFt}, Qt-FtC={s.k_QtFtC}")
         else:
-            print(f"  Mixed-state ε: Qt-QtC={lj.epsilon_QtQtC}, Ft-FtC={lj.epsilon_FtFtC}, "
-                  f"QtC-Ft={lj.epsilon_QtCFt}, Qt-FtC={lj.epsilon_QtFtC}")
+            print(f"\nLennard-Jones:")
+            print(f"  Potential type: {self.lj.potential_type}")
+            print(f"  Cutoff factor: {self.lj.cutoff_factor:.3f}")
+            lj = self.lj
+            print(f"  ε Qt-Qt: {lj.epsilon_QtQt} kJ/mol", end="")
+            if lj.epsilon_QtCQtC == 0:
+                print(f"  (QtC-QtC: disabled)", end="")
+            elif lj.epsilon_QtCQtC != lj.epsilon_QtQt:
+                print(f"  (QtC-QtC: {lj.epsilon_QtCQtC})", end="")
+            print()
+            print(f"  ε Ft-Ft: {lj.epsilon_FtFt} kJ/mol", end="")
+            if lj.epsilon_FtCFtC == 0:
+                print(f"  (FtC-FtC: disabled)", end="")
+            elif lj.epsilon_FtCFtC != lj.epsilon_FtFt:
+                print(f"  (FtC-FtC: {lj.epsilon_FtCFtC})", end="")
+            print()
+            print(f"  ε Qt-Ft: {lj.epsilon_QtFt} kJ/mol", end="")
+            if lj.epsilon_QtCFtC == 0:
+                print(f"  (QtC-FtC: disabled)", end="")
+            elif lj.epsilon_QtCFtC != lj.epsilon_QtFt:
+                print(f"  (QtC-FtC: {lj.epsilon_QtCFtC})", end="")
+            print()
+            # Show cluster/mixed-state summary if all defaults
+            all_cluster_default = (
+                lj.epsilon_QtCQtC == lj.epsilon_QtQt and
+                lj.epsilon_FtCFtC == lj.epsilon_FtFt and
+                lj.epsilon_QtCFtC == lj.epsilon_QtFt
+            )
+            all_mixed_default = (
+                lj.epsilon_QtQtC == lj.epsilon_QtCQtC and
+                lj.epsilon_FtFtC == lj.epsilon_FtCFtC and
+                lj.epsilon_QtCFt == lj.epsilon_QtCFtC and
+                lj.epsilon_QtFtC == lj.epsilon_QtCFtC
+            )
+            if all_cluster_default and all_mixed_default:
+                print(f"  Cluster/mixed ε: same as free (default)")
+            elif all_mixed_default:
+                print(f"  Mixed-state ε: same as cluster (default)")
+            else:
+                print(f"  Mixed-state ε: Qt-QtC={lj.epsilon_QtQtC}, Ft-FtC={lj.epsilon_FtFtC}, "
+                      f"QtC-Ft={lj.epsilon_QtCFt}, Qt-FtC={lj.epsilon_QtFtC}")
         print(f"\nSimulation:")
         print(f"  Box: {self.box_size[0]} × {self.box_size[1]} × {self.box_size[2]} nm")
         print(f"  Temperature: {self.temperature} K")
         print(f"  Equilibration potential: {self.equilibration_potential}")
-        print(f"  Timestep: {self.timestep} ns ({self.timestep * 1e3:.2f} ps)")
+        print(f"  Timestep: {self.timestep} ns ({format_duration(self.timestep)})")
         if self.phases:
             print(f"  Phases: {len(self.phases)} "
                   f"({', '.join(p.name for p in self.phases)})")
             for p in self.phases:
-                ph_us = p.n_steps * self.timestep * NS_TO_US
-                print(f"    - {p.name}: {p.n_steps:,} steps ({ph_us:.1f} µs), "
+                ph_ns = p.n_steps * self.timestep
+                print(f"    - {p.name}: {p.n_steps:,} steps ({format_duration(ph_ns)}), "
                       f"binding={p.binding}, breaking={p.breaking}, pot={p.potential_type}")
             print(f"  Total steps: {self.effective_n_steps:,} "
-                  f"({self.total_simulation_time_us:.1f} µs total)")
+                  f"({format_duration(self.total_simulation_time_us * 1e3)} total)")
         else:
-            print(f"  Steps: {self.n_steps:,} ({self.total_simulation_time_us:.1f} µs total)")
+            print(f"  Steps: {self.n_steps:,} "
+                  f"({format_duration(self.total_simulation_time_us * 1e3)} total)")
         print(f"  Output: {self.output_file}")
         print("=" * 60)
     
@@ -1092,20 +1369,26 @@ def format_param_string(config: "SimulationConfig") -> str:
     def fmt_num(val):
         return f"{int(val)}" if val == int(val) else f"{val}"
 
-    eqq = f"eQQ{fmt_num(lj.epsilon_QtQt)}"
-    eff = f"eFF{fmt_num(lj.epsilon_FtFt)}"
-    eqf = f"eQF{fmt_num(lj.epsilon_QtFt)}"
-
     kon_str = f"kon{fmt_num(config.topology.kon)}"
 
-    dt_ps = config.timestep * 1000  # ns -> ps
-    dt_str = f"dt{dt_ps:.0f}ps" if dt_ps >= 1 else f"dt{dt_ps:.2f}ps"
+    # Timestep and total time use an adaptive unit (ps/ns/µs/ms/s) chosen from magnitude.
+    # For the ranges existing datasets live in (dt in ps, total in µs) this reproduces the
+    # old "dt50ps"/"100us" strings exactly; only ms/s-scale runs get the new units.
+    dt_str = f"dt{format_duration(config.timestep, ascii=True)}"
+    time_str = format_duration(config.total_simulation_time_us * 1e3, ascii=True)
 
-    total_us = config.total_simulation_time_us
-    time_str = f"{total_us:.0f}us" if total_us >= 1 else f"{total_us:.2f}us"
+    # Coefficient block: soft mode is self-contained (epsilon unused), so it encodes its
+    # three free-free force constants (kQQ/kFF/kQF); WCA/LJ encode the free-free epsilons
+    # (eQQ/eFF/eQF) exactly as before, so their filenames are byte-identical.
+    if lj.potential_type == "soft":
+        s = config.soft
+        coeff = f"kQQ{fmt_num(s.k_QtQt)}_kFF{fmt_num(s.k_FtFt)}_kQF{fmt_num(s.k_QtFt)}"
+    else:
+        coeff = (f"eQQ{fmt_num(lj.epsilon_QtQt)}_eFF{fmt_num(lj.epsilon_FtFt)}"
+                 f"_eQF{fmt_num(lj.epsilon_QtFt)}")
 
     # Leading identity block, shared by single and phased runs.
-    prefix = f"{config.n_qt}Qt_{config.n_ft}Ft_{lj.potential_type}_{eqq}_{eff}_{eqf}"
+    prefix = f"{config.n_qt}Qt_{config.n_ft}Ft_{lj.potential_type}_{coeff}"
 
     # Additive tag so monovalent-Ft runs don't collide with multivalent ones on disk.
     # Off by default => suffix absent => existing folder/file names are unchanged.

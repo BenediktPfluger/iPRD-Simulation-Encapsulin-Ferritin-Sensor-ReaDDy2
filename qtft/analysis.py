@@ -47,6 +47,7 @@ from .config import (
     LennardJonesConfig,
     NS_TO_US,
     _steps_to_us,
+    format_duration,
 )
 
 # Try to import tqdm for progress bars, with fallback
@@ -1470,7 +1471,11 @@ def print_analysis_summary(h5_file: str, config: Optional[SimulationConfig] = No
     print(f"  Largest: {stats['max_sizes'][0]} particles")
     print(f"  Bonds: {bonds['n_bonds'][0]}")
     
-    print(f"\nFinal state (t={times_us[-1]:.2f} {time_unit}):")
+    if config is not None:
+        final_time_str = format_duration(times_us[-1] * 1e3)
+    else:
+        final_time_str = f"{times_us[-1]:.0f} {time_unit}"
+    print(f"\nFinal state (t={final_time_str}):")
     print(f"  Topologies: {stats['n_clusters'][-1]}")
     print(f"  Average size: {stats['avg_sizes'][-1]:.2f} particles")
     print(f"  Largest: {stats['max_sizes'][-1]} particles")

@@ -43,7 +43,20 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import MaxNLocator
 
 # Import from simulation module
-from .config import SimulationConfig, NS_TO_US, _steps_to_us
+from .config import SimulationConfig, NS_TO_US, _steps_to_us, choose_time_unit
+
+
+def _time_axis(times_us):
+    """Scale a µs time array to an adaptive unit for plotting.
+
+    Returns ``(scaled_array, axis_label)`` where the unit (µs/ms/s/…) is chosen from the
+    array's maximum, so axis numbers stay readable. Panels built from the same trajectory
+    share a unit automatically (same max => same choice).
+    """
+    arr = np.asarray(times_us, dtype=float)
+    max_us = float(arr.max()) if arr.size else 0.0
+    factor, unit = choose_time_unit(max_us)
+    return arr * factor, f"Time ({unit})"
 
 # Import analysis functions needed by plotting
 from .analysis import (
@@ -105,9 +118,8 @@ def plot_composition_analysis(
     fig, axes = plt.subplots(1, 3, figsize=figsize)
     ax_hist, ax_time, ax_scatter = axes
     
-    times_us = _steps_to_us(composition["times"], config.timestep)
-    time_label = "Time (µs)"
-    
+    times_us, time_label = _time_axis(_steps_to_us(composition["times"], config.timestep))
+
     # =========================================================================
     # Plot A: Composition histogram (final frame)
     # =========================================================================
@@ -161,7 +173,7 @@ def plot_composition_analysis(
     if len(all_fractions) > 0:
         scatter = ax_scatter.scatter(all_sizes, all_fractions, c=all_times, cmap='viridis',
                                      alpha=0.6, s=20)
-        plt.colorbar(scatter, ax=ax_scatter, label='Time (µs)')
+        plt.colorbar(scatter, ax=ax_scatter, label=time_label)
         ax_scatter.axhline(0.5, color='gray', linestyle='--', alpha=0.5)
     
     ax_scatter.set_xlabel("Cluster Size (particles)", fontsize=FONTSIZE_LABEL)
@@ -299,8 +311,10 @@ def plot_structural_analysis(
     fig = plt.figure(figsize=figsize)
     gs = fig.add_gridspec(4, 3, hspace=0.35, wspace=0.35)
     
-    time_label = "Time (µs)"
-    
+    # One adaptive unit for every time axis / marker in this multi-panel figure.
+    time_factor, time_unit = choose_time_unit(config.total_simulation_time_us)
+    time_label = f"Time ({time_unit})"
+
     # =========================================================================
     # Row 1: Morphology
     # =========================================================================
@@ -309,7 +323,7 @@ def plot_structural_analysis(
     ax_rg_dist = fig.add_subplot(gs[0, 2])
     
     # Plot 1.1: Rg over time
-    times_us = _steps_to_us(morphology["times"], config.timestep)
+    times_us = _steps_to_us(morphology["times"], config.timestep) * time_factor
     ax_rg_time.plot(times_us, morphology["mean_rg"], 'b-', linewidth=2, label='Mean Rg')
     ax_rg_time.fill_between(times_us, 
                             morphology["mean_rg"] - morphology["std_rg"],
@@ -335,7 +349,7 @@ def plot_structural_analysis(
     if len(all_rg) > 0:
         scatter = ax_rg_size.scatter(all_sizes, all_rg, c=all_times, cmap='viridis', 
                                       alpha=0.6, s=20)
-        plt.colorbar(scatter, ax=ax_rg_size, label='Time (µs)')
+        plt.colorbar(scatter, ax=ax_rg_size, label=time_label)
     ax_rg_size.set_xlabel("Cluster Size (particles)", fontsize=FONTSIZE_LABEL)
     ax_rg_size.set_ylabel("Radius of Gyration (nm)", fontsize=FONTSIZE_LABEL)
     ax_rg_size.set_title("Rg vs Cluster Size", fontsize=FONTSIZE_TITLE, fontweight='bold')
@@ -362,7 +376,7 @@ def plot_structural_analysis(
     ax_frac = fig.add_subplot(gs[1, 2])
     
     # Plot 2.1: Bonds over time with rate
-    times_kin_us = _steps_to_us(kinetics["times"], config.timestep)
+    times_kin_us = _steps_to_us(kinetics["times"], config.timestep) * time_factor
     ax_bonds.plot(times_kin_us, kinetics["n_bonds"], 'b-', linewidth=2, label='Bonds')
     ax_bonds.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax_bonds.set_ylabel("Number of Bonds", color='blue', fontsize=FONTSIZE_LABEL)
@@ -393,11 +407,11 @@ def plot_structural_analysis(
     
     # Mark half-times
     if kinetics["half_time_qt"] is not None:
-        ht_qt_us = _steps_to_us(np.array([kinetics["half_time_qt"]]), config.timestep)[0]
+        ht_qt_us = _steps_to_us(np.array([kinetics["half_time_qt"]]), config.timestep)[0] * time_factor
         ax_frac.axvline(ht_qt_us, color='blue', linestyle=':', alpha=0.7)
         ax_frac.text(ht_qt_us, 0.52, f't½={ht_qt_us:.2f}', color='blue', fontsize=FONTSIZE_LEGEND)
     if kinetics["half_time_ft"] is not None:
-        ht_ft_us = _steps_to_us(np.array([kinetics["half_time_ft"]]), config.timestep)[0]
+        ht_ft_us = _steps_to_us(np.array([kinetics["half_time_ft"]]), config.timestep)[0] * time_factor
         ax_frac.axvline(ht_ft_us, color='red', linestyle=':', alpha=0.7)
         ax_frac.text(ht_ft_us, 0.48, f't½={ht_ft_us:.2f}', color='red', fontsize=FONTSIZE_LEGEND)
     
@@ -416,7 +430,7 @@ def plot_structural_analysis(
     ax_nn_dist = fig.add_subplot(gs[2, 2])
     
     # Plot 3.1: NN distance over time
-    times_sp_us = _steps_to_us(spatial["times"], config.timestep)
+    times_sp_us = _steps_to_us(spatial["times"], config.timestep) * time_factor
     ax_nn_time.plot(times_sp_us, spatial["mean_nn_dist"], 'b-', linewidth=2, label='Observed')
     ax_nn_time.fill_between(times_sp_us,
                             spatial["mean_nn_dist"] - spatial["std_nn_dist"],
@@ -504,7 +518,7 @@ def plot_structural_analysis(
     ax_bonds_size = fig.add_subplot(gs[3, 2])
     
     # Plot 4.1: Coordination over time
-    times_ct_us = _steps_to_us(contacts["times"], config.timestep)
+    times_ct_us = _steps_to_us(contacts["times"], config.timestep) * time_factor
     ax_coord_time.plot(times_ct_us, contacts["mean_coord_qt"], 'b-', linewidth=2, label='QtC')
     ax_coord_time.fill_between(times_ct_us,
                                contacts["mean_coord_qt"] - contacts["std_coord_qt"],
@@ -559,8 +573,8 @@ def plot_structural_analysis(
     if len(all_bonds) > 0:
         scatter = ax_bonds_size.scatter(all_cluster_sizes, all_bonds, c=all_frame_times, 
                                         cmap='viridis', alpha=0.5, s=20)
-        plt.colorbar(scatter, ax=ax_bonds_size, label='Time (µs)')
-        
+        plt.colorbar(scatter, ax=ax_bonds_size, label=time_label)
+
         # Add reference line (n-1 bonds for linear chain)
         x_ref = np.array([2, max(all_cluster_sizes)])
         ax_bonds_size.plot(x_ref, x_ref - 1, 'k--', linewidth=1, alpha=0.5, label='Linear (n-1)')
@@ -755,7 +769,7 @@ def _plot_particle_counts(ax, traj, types, time_label, timestep: float) -> Optio
     """Plot particle counts over time."""
     try:
         result = traj.read_observable_number_of_particles()
-        times = _steps_to_us(result[0], timestep)
+        times, time_label = _time_axis(_steps_to_us(result[0], timestep))
         counts = np.array(result[1])
         
         for i, label in enumerate(types):
@@ -791,7 +805,7 @@ def _plot_energy(ax, traj, time_label, timestep: float) -> Optional[Dict]:
     """Plot energy over time."""
     try:
         times, energy = traj.read_observable_energy()
-        times = _steps_to_us(times, timestep)
+        times, time_label = _time_axis(_steps_to_us(times, timestep))
         energy = np.array(energy)
         
         ax.plot(times, energy, color="tab:red", linewidth=1.5)
@@ -801,7 +815,7 @@ def _plot_energy(ax, traj, time_label, timestep: float) -> Optional[Dict]:
         ax.grid(True, alpha=0.3)
         ax.xaxis.set_major_locator(MaxNLocator(nbins=6))
         
-        return {"times": times, "energy": energy}
+        return {"times": times, "energy": energy, "time_label": time_label}
     except (KeyError, ValueError) as e:
         print(f"  Warning: Could not plot energy: {e}")
         ax.text(0.5, 0.5, "No data available", ha="center", va="center", 
@@ -822,7 +836,7 @@ def _plot_pressure(ax, traj, time_label, timestep: float):
     """Plot pressure over time."""
     try:
         times, pressure = traj.read_observable_pressure()
-        times = _steps_to_us(times, timestep)
+        times, time_label = _time_axis(_steps_to_us(times, timestep))
         
         ax.plot(times, pressure, color="tab:green", linewidth=1.5)
         ax.set_title("Pressure", fontsize=FONTSIZE_TITLE, fontweight="bold")
@@ -848,7 +862,7 @@ def _plot_cumulative_reactions(ax, traj, time_label, timestep: float):
     """Plot cumulative reaction counts."""
     try:
         times, counts_dict = traj.read_observable_reaction_counts()
-        times = _steps_to_us(times, timestep)
+        times, time_label = _time_axis(_steps_to_us(times, timestep))
         
         colors = plt.cm.tab10(np.linspace(0, 1, 10))
         total_cumulative = np.zeros(len(times))
@@ -982,7 +996,7 @@ def _plot_bonds(ax, h5_file, time_label, timestep: float, trajectory=None) -> Op
     """Plot bond count over time."""
     try:
         data = get_bond_counts(h5_file, trajectory=trajectory)
-        times = _steps_to_us(data["times"], timestep)
+        times, time_label = _time_axis(_steps_to_us(data["times"], timestep))
         bonds = data["n_bonds"]
         
         ax.plot(times, bonds, color="tab:orange", linewidth=2)
@@ -996,7 +1010,8 @@ def _plot_bonds(ax, h5_file, time_label, timestep: float, trajectory=None) -> Op
                fontsize=FONTSIZE_LEGEND, va="top",
                bbox=dict(boxstyle="round", facecolor="white", alpha=0.8))
         
-        return {"times": times, "bonds": bonds, "trajectory": data.get("trajectory")}
+        return {"times": times, "bonds": bonds, "trajectory": data.get("trajectory"),
+                "time_label": time_label}
     except (KeyError, ValueError, FileNotFoundError) as e:
         print(f"  Warning: Could not plot bonds: {e}")
         ax.text(0.5, 0.5, "No data available", ha="center", va="center", 
@@ -1027,7 +1042,7 @@ def _plot_energy_vs_bonds(ax, energy_data, bond_data):
     times = bond_data["times"]
     
     scatter = ax.scatter(bonds, energy, c=times, cmap="viridis", alpha=0.6, s=15)
-    plt.colorbar(scatter, ax=ax, label="Time (µs)")
+    plt.colorbar(scatter, ax=ax, label=bond_data.get("time_label", "Time"))
     
     # Linear fit
     if len(bonds) > 10:
@@ -1082,12 +1097,13 @@ def plot_cluster_analysis(
     
     # Convert times - need timestep from config for proper conversion
     if config is not None:
-        times_us = _steps_to_us(stats["times"], config.timestep)
-        time_label = "Time (µs)"
+        times_us, time_label = _time_axis(_steps_to_us(stats["times"], config.timestep))
     else:
         times_us = stats["times"]  # Just use step numbers
         time_label = "Time (steps)"
-    
+    # Bare unit (e.g. "µs") for inline annotations, derived from the axis label.
+    time_unit = time_label[time_label.find("(") + 1: time_label.find(")")] if "(" in time_label else ""
+
     fig = plt.figure(figsize=figsize)
     gs = fig.add_gridspec(2, 3, hspace=0.3, wspace=0.3)
     
@@ -1125,7 +1141,7 @@ def plot_cluster_analysis(
         ax3.axvline(np.mean(final_sizes), color="blue", linestyle="--",
                    label=f"Mean={np.mean(final_sizes):.1f}")
         ax3.legend(loc="upper right", fontsize=FONTSIZE_LEGEND)
-    ax3.set_title(f"Size Distribution (t={times_us[-1]:.1f} µs)", fontsize=FONTSIZE_TITLE, fontweight="bold")
+    ax3.set_title(f"Size Distribution (t={times_us[-1]:.1f} {time_unit})", fontsize=FONTSIZE_TITLE, fontweight="bold")
     ax3.set_xlabel("Cluster size", fontsize=FONTSIZE_LABEL)
     ax3.set_ylabel("Count", fontsize=FONTSIZE_LABEL)
     ax3.grid(True, alpha=0.3, axis="y")
@@ -1344,22 +1360,24 @@ def _ensemble_all_trace(stats: Dict, structural: Optional[Dict], key: str):
 
 def _ensemble_struct_ts(structural: Optional[Dict], timestep: float, time_key: str,
                         mean_key: str, std_key: str, all_key: Optional[str] = None):
-    """Fetch a structural time series and convert its step axis to µs.
+    """Fetch a structural time series and convert its step axis to an adaptive time unit.
 
-    Returns ``(times_us, mean, std, all_data)`` with any present arrays as ndarrays and
-    missing ones as None. Shared by the ensemble structural plot and the ensemble panel.
+    Returns ``(times, mean, std, all_data, time_label)`` with any present arrays as ndarrays
+    (times already scaled to the unit named in ``time_label``) and missing ones as None.
+    Shared by the ensemble structural plot and the ensemble panel.
     """
     times = structural.get(time_key) if structural else None
     mean = structural.get(mean_key) if structural else None
     std = structural.get(std_key) if structural else None
     all_data = structural.get(all_key) if (structural and all_key) else None
+    time_label = "Time (µs)"
     if times is not None:
-        times = _steps_to_us(np.asarray(times), timestep)
+        times, time_label = _time_axis(_steps_to_us(np.asarray(times), timestep))
     if mean is not None:
         mean = np.asarray(mean)
     if std is not None:
         std = np.asarray(std)
-    return times, mean, std, all_data
+    return times, mean, std, all_data, time_label
 
 
 def plot_ensemble_observables(
@@ -1414,9 +1432,8 @@ def plot_ensemble_observables(
     # Get timestep from config dict for proper time conversion
     config = config or {}
     timestep = config.get('timestep', 1e-4)  # Default if not found
-    times_us = _steps_to_us(np.asarray(stats['times']), timestep)
+    times_us, time_label = _time_axis(_steps_to_us(np.asarray(stats['times']), timestep))
     n_replicas = stats.get('n_replicas', 1)
-    time_label = "Time (µs)"
 
     # ==========================================================================
     # Thermodynamics / bonds (grid cells assigned explicitly per block below)
@@ -1716,7 +1733,7 @@ def plot_ensemble_structural(
     
     # Plot 1: Mean Rg
     ax = axes[0, 0]
-    times, mean, std, all_data = _ensemble_struct_ts(structural, timestep, 
+    times, mean, std, all_data, time_label = _ensemble_struct_ts(structural, timestep, 
         'morphology_times', 'mean_rg_mean', 'mean_rg_std', 'mean_rg_all')
     if times is not None and mean is not None:
         if _ensemble_plot_with_band(ax, times, mean, std, 'tab:blue', n_replicas,
@@ -1731,9 +1748,9 @@ def plot_ensemble_structural(
     
     # Plot 2: Coordination Number (Qt & Ft fused into one axes)
     ax = axes[0, 1]
-    t_qt, m_qt, s_qt, all_qt = _ensemble_struct_ts(structural, timestep, 
+    t_qt, m_qt, s_qt, all_qt, time_label = _ensemble_struct_ts(structural, timestep, 
         'contacts_times', 'mean_coord_qt_mean', 'mean_coord_qt_std', 'mean_coord_qt_all')
-    t_ft, m_ft, s_ft, all_ft = _ensemble_struct_ts(structural, timestep, 
+    t_ft, m_ft, s_ft, all_ft, _ = _ensemble_struct_ts(structural, timestep, 
         'contacts_times', 'mean_coord_ft_mean', 'mean_coord_ft_std', 'mean_coord_ft_all')
     coord_plotted = False
     if t_qt is not None and m_qt is not None:
@@ -1759,7 +1776,7 @@ def plot_ensemble_structural(
 
     # Plot 3: NN Distance
     ax = axes[0, 2]
-    times, mean, std, all_data = _ensemble_struct_ts(structural, timestep, 
+    times, mean, std, all_data, time_label = _ensemble_struct_ts(structural, timestep, 
         'spatial_times', 'mean_nn_dist_mean', 'mean_nn_dist_std', 'mean_nn_dist_all')
     if times is not None and mean is not None:
         if _ensemble_plot_with_band(ax, times, mean, std, 'tab:purple', n_replicas,
@@ -1842,7 +1859,7 @@ def plot_ensemble_structural(
     
     # Plot 7: Mean composition over time
     ax = axes[2, 0]
-    times, mean, std, all_data = _ensemble_struct_ts(structural, timestep, 
+    times, mean, std, all_data, time_label = _ensemble_struct_ts(structural, timestep, 
         'composition_times', 'mean_composition_mean', 'mean_composition_std', 'mean_composition_all')
     if times is not None and mean is not None:
         if _ensemble_plot_with_band(ax, times, mean, std, 'purple', n_replicas,
@@ -1979,7 +1996,7 @@ def plot_ensemble_size_categories(
         return fig
     
     timestep = config.get('timestep', 1e-4)
-    times_us = _steps_to_us(np.asarray(structural['size_fractions_times']), timestep)
+    times_us, time_label = _time_axis(_steps_to_us(np.asarray(structural['size_fractions_times']), timestep))
     n_replicas = stats.get('n_replicas', '?')
     
     # Get category names
@@ -2012,7 +2029,7 @@ def plot_ensemble_size_categories(
     desc = _generate_ensemble_title(config, n_replicas=n_replicas)
     ax.set_title(f"Particles by Size Category — {desc}",
                 fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.set_xlabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+    ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Fraction", fontsize=FONTSIZE_LABEL)
     ax.set_ylim([0, 1])
     ax.legend(loc="upper right", fontsize=FONTSIZE_LEGEND)
@@ -2071,8 +2088,8 @@ def plot_comparison_size_categories(
             continue
         
         timestep = ens.get('timestep', config.get('timestep', 1e-4))
-        times_us = _steps_to_us(np.asarray(structural['size_fractions_times']), timestep)
-        
+        times_us, time_label = _time_axis(_steps_to_us(np.asarray(structural['size_fractions_times']), timestep))
+
         # Get category names
         if 'size_fractions_category_names' in structural:
             category_names = list(structural['size_fractions_category_names'])
@@ -2102,7 +2119,7 @@ def plot_comparison_size_categories(
         desc = _generate_ensemble_title(config, n_replicas=n_replicas)
         ax.set_title(f"Particles by Size Category — {desc}",
                     fontsize=FONTSIZE_TITLE, fontweight='bold')
-        ax.set_xlabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+        ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
         ax.set_ylabel("Fraction", fontsize=FONTSIZE_LABEL)
         ax.set_ylim([0, 1])
         ax.legend(loc="upper right", fontsize=FONTSIZE_LEGEND)
@@ -2167,6 +2184,13 @@ def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, tit
     Returns True if any data was drawn.
     """
     labels = comparison['labels']
+    # One time unit for the whole (multi-ensemble) axis, from the longest series.
+    max_us = max(
+        (float(np.asarray(comparison['ensembles'][l]['times_us']).max())
+         for l in labels if len(comparison['ensembles'][l].get('times_us', []))),
+        default=0.0,
+    )
+    time_factor, time_unit = choose_time_unit(max_us)
     has_data = False
     for i, label in enumerate(labels):
         ens = comparison['ensembles'][label]
@@ -2183,14 +2207,15 @@ def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, tit
             mean_vals = mean_vals / N
             std_vals = std_vals / N
         color = COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
-        ax.plot(ens['times_us'], mean_vals, color=color, linewidth=2, label=label)
+        t = np.asarray(ens['times_us']) * time_factor
+        ax.plot(t, mean_vals, color=color, linewidth=2, label=label)
         if show_bands and len(std_vals) == len(mean_vals):
-            ax.fill_between(ens['times_us'], mean_vals - std_vals, mean_vals + std_vals,
+            ax.fill_between(t, mean_vals - std_vals, mean_vals + std_vals,
                             color=color, alpha=0.2)
         has_data = True
     if not has_data:
         _ensemble_show_no_data(ax)
-    ax.set_xlabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
     ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
@@ -2207,13 +2232,23 @@ def _comparison_struct_ts(ax, comparison: dict, time_key: str, mean_key: str, st
     inside legend at ``legend_loc``. Returns True if any data was drawn.
     """
     labels = comparison['labels']
+    # One time unit for the whole (multi-ensemble) axis, from the longest series.
+    max_us = 0.0
+    for label in labels:
+        s = comparison['ensembles'][label].get('structural', {})
+        if time_key in s:
+            arr = _steps_to_us(np.asarray(s[time_key]),
+                               comparison['ensembles'][label].get('timestep', 0.001))
+            if arr.size:
+                max_us = max(max_us, float(arr.max()))
+    time_factor, time_unit = choose_time_unit(max_us)
     has_data = False
     for i, label in enumerate(labels):
         ens = comparison['ensembles'][label]
         structural = ens.get('structural', {})
         if time_key not in structural or mean_key not in structural:
             continue
-        times_us = _steps_to_us(np.asarray(structural[time_key]), ens.get('timestep', 0.001))
+        times_us = _steps_to_us(np.asarray(structural[time_key]), ens.get('timestep', 0.001)) * time_factor
         mean_vals = np.asarray(structural[mean_key])
         std_vals = np.asarray(structural.get(std_key, np.zeros_like(mean_vals)))
         min_len = min(len(times_us), len(mean_vals))
@@ -2226,7 +2261,7 @@ def _comparison_struct_ts(ax, comparison: dict, time_key: str, mean_key: str, st
         has_data = True
     if not has_data:
         _ensemble_show_no_data(ax)
-    ax.set_xlabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
     ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
@@ -2243,13 +2278,23 @@ def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool,
     Owns its legend (ensemble colours + a Qt/Ft linestyle key). Returns True if data drawn.
     """
     labels = comparison['labels']
+    # One time unit for the whole (multi-ensemble) axis, from the longest series.
+    max_us = 0.0
+    for label in labels:
+        s = comparison['ensembles'][label].get('structural', {})
+        if 'contacts_times' in s:
+            arr = _steps_to_us(np.asarray(s['contacts_times']),
+                               comparison['ensembles'][label].get('timestep', 0.001))
+            if arr.size:
+                max_us = max(max_us, float(arr.max()))
+    time_factor, time_unit = choose_time_unit(max_us)
     has_data = False
     for i, label in enumerate(labels):
         ens = comparison['ensembles'][label]
         structural = ens.get('structural', {})
         if 'contacts_times' not in structural:
             continue
-        times_us = _steps_to_us(np.asarray(structural['contacts_times']), ens.get('timestep', 0.001))
+        times_us = _steps_to_us(np.asarray(structural['contacts_times']), ens.get('timestep', 0.001)) * time_factor
         color = COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
         for mean_key, std_key, ls in (
             ('mean_coord_qt_mean', 'mean_coord_qt_std', '-'),
@@ -2268,7 +2313,7 @@ def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool,
             has_data = True
     if not has_data:
         _ensemble_show_no_data(ax)
-    ax.set_xlabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Mean Coordination", fontsize=FONTSIZE_LABEL)
     ax.set_title("Coordination Number", fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
@@ -2599,7 +2644,15 @@ def plot_comparison_final_state(
             half_time_replica_values.append(None)
     
     if any(half_time_available):
-        colors = ['steelblue' if avail else 'lightgray' 
+        # Half-times are in µs; scale to one adaptive unit for the bar axis.
+        ht_factor, ht_unit = choose_time_unit(max(half_times) if half_times else 0.0)
+        half_times = [h * ht_factor for h in half_times]
+        half_time_errors = [e * ht_factor for e in half_time_errors]
+        half_time_replica_values = [
+            (np.asarray(v) * ht_factor if v is not None else None)
+            for v in half_time_replica_values
+        ]
+        colors = ['steelblue' if avail else 'lightgray'
                  for avail in half_time_available]
         bars = ax.bar(x, half_times, width, yerr=half_time_errors, capsize=5,
                      color=colors, edgecolor='black', linewidth=1)
@@ -2616,7 +2669,7 @@ def plot_comparison_final_state(
         
         ax.set_xticks(x)
         ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=FONTSIZE_TICK)
-        ax.set_ylabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+        ax.set_ylabel(f"Time ({ht_unit})", fontsize=FONTSIZE_LABEL)
         ax.set_title("Half-time (50% bound)", fontsize=FONTSIZE_TITLE, fontweight='bold')
         ax.grid(True, alpha=0.3, axis='y')
     else:
@@ -2764,10 +2817,16 @@ def plot_comparison_summary(
         title : str
         """
         has_data = False
-        
+        # One time unit for the whole (multi-ensemble) axis, from the longest series.
+        max_us = max(
+            (float(np.asarray(comparison['ensembles'][l]['times_us']).max())
+             for l in labels if len(comparison['ensembles'][l].get('times_us', []))),
+            default=0.0,
+        )
+        tf, tunit = choose_time_unit(max_us)
         for i, label in enumerate(labels):
             ens = comparison['ensembles'][label]
-            times_us = ens['times_us']
+            times_us = np.asarray(ens['times_us']) * tf
             color = COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
             
             for ptype in particle_types:
@@ -2783,7 +2842,7 @@ def plot_comparison_summary(
             ax.text(0.5, 0.5, "No data available", ha='center', va='center',
                    transform=ax.transAxes, fontsize=FONTSIZE_TITLE, color='gray')
         
-        ax.set_xlabel("Time (µs)", fontsize=FONTSIZE_LABEL)
+        ax.set_xlabel(f"Time ({tunit})", fontsize=FONTSIZE_LABEL)
         ax.set_ylabel("Count", fontsize=FONTSIZE_LABEL)
         ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
         ax.grid(True, alpha=0.3)
@@ -2913,15 +2972,23 @@ def plot_phased_kinetics(
     if data is None:
         data = load_phased_observables(config, phase_files=phase_files)
 
-    bnd = data["phase_boundaries_us"]
-    starts = data["phase_starts_us"]
+    # One adaptive time unit for the whole figure (all axes + phase markers), from the
+    # overall duration, so the axes and the phase-boundary lines stay aligned.
+    _tarr = np.asarray(data["time_us"])
+    time_factor, time_unit = choose_time_unit(float(_tarr.max()) if _tarr.size else 0.0)
+    time_label = f"Time ({time_unit})"
+    t_bonds = _tarr * time_factor
+    t_kin = np.asarray(data["kin_time_us"]) * time_factor
+    t_clus = np.asarray(data["cluster_time_us"]) * time_factor
+    bnd = list(np.asarray(data["phase_boundaries_us"]) * time_factor) if data["phase_boundaries_us"] else []
+    starts = list(np.asarray(data["phase_starts_us"]) * time_factor) if data["phase_starts_us"] else []
     names = data["phase_names"]
 
     fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
 
     # 1) Bonds
     ax = axes[0]
-    ax.plot(data["time_us"], data["n_bonds"], color="C0", lw=1.5)
+    ax.plot(t_bonds, data["n_bonds"], color="C0", lw=1.5)
     ax.set_ylabel("Number of bonds")
     ax.set_title("Agglomeration / deagglomeration cycle")
     ax.grid(True, alpha=0.3)
@@ -2929,8 +2996,8 @@ def plot_phased_kinetics(
 
     # 2) Fraction bound
     ax = axes[1]
-    ax.plot(data["kin_time_us"], data["fraction_bound_qt"], color="C1", lw=1.5, label="Qt")
-    ax.plot(data["kin_time_us"], data["fraction_bound_ft"], color="C2", lw=1.5, label="Ft")
+    ax.plot(t_kin, data["fraction_bound_qt"], color="C1", lw=1.5, label="Qt")
+    ax.plot(t_kin, data["fraction_bound_ft"], color="C2", lw=1.5, label="Ft")
     ax.set_ylabel("Fraction bound")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(loc="center left")
@@ -2939,9 +3006,9 @@ def plot_phased_kinetics(
 
     # 3) Average cluster size
     ax = axes[2]
-    ax.plot(data["cluster_time_us"], data["avg_sizes"], color="C3", lw=1.5)
+    ax.plot(t_clus, data["avg_sizes"], color="C3", lw=1.5)
     ax.set_ylabel("Avg cluster size")
-    ax.set_xlabel("Time (µs)")
+    ax.set_xlabel(time_label)
     ax.grid(True, alpha=0.3)
     _mark_phase_boundaries(ax, bnd)
 
@@ -2982,9 +3049,8 @@ def plot_ensemble_panel(
 
     config = config or {}
     timestep = config.get('timestep', 1e-4)
-    times_us = _steps_to_us(np.asarray(stats['times']), timestep)
+    times_us, time_label = _time_axis(_steps_to_us(np.asarray(stats['times']), timestep))
     n_replicas = stats.get('n_replicas', 1)
-    time_label = "Time (µs)"
 
     def simple_band(ax, mean_key, std_key, color, title, ylabel, legend_loc='best'):
         if mean_key in stats:
@@ -3046,7 +3112,7 @@ def plot_ensemble_panel(
     ax = axes[2, 1]
     if structural and 'size_fractions_times' in structural and \
             'size_fractions_category_names' in structural:
-        sc_times = _steps_to_us(np.asarray(structural['size_fractions_times']), timestep)
+        sc_times, time_label = _time_axis(_steps_to_us(np.asarray(structural['size_fractions_times']), timestep))
         category_names = list(structural['size_fractions_category_names'])
         mean_fractions = []
         for cat_name in category_names:
@@ -3069,7 +3135,7 @@ def plot_ensemble_panel(
     ax.grid(True, alpha=0.3, axis='y')
 
     ax = axes[2, 2]
-    times, mean, std, all_data = _ensemble_struct_ts(
+    times, mean, std, all_data, time_label = _ensemble_struct_ts(
         structural, timestep, 'morphology_times', 'mean_rg_mean', 'mean_rg_std', 'mean_rg_all')
     if times is not None and mean is not None:
         if _ensemble_plot_with_band(ax, times, mean, std, 'tab:blue', n_replicas,
@@ -3084,10 +3150,10 @@ def plot_ensemble_panel(
 
     # Row 4: coordination (Qt+Ft fused), mean composition, empty
     ax = axes[3, 0]
-    t_qt, m_qt, s_qt, all_qt = _ensemble_struct_ts(
+    t_qt, m_qt, s_qt, all_qt, time_label = _ensemble_struct_ts(
         structural, timestep, 'contacts_times', 'mean_coord_qt_mean', 'mean_coord_qt_std',
         'mean_coord_qt_all')
-    t_ft, m_ft, s_ft, all_ft = _ensemble_struct_ts(
+    t_ft, m_ft, s_ft, all_ft, _ = _ensemble_struct_ts(
         structural, timestep, 'contacts_times', 'mean_coord_ft_mean', 'mean_coord_ft_std',
         'mean_coord_ft_all')
     coord_plotted = False
@@ -3109,7 +3175,7 @@ def plot_ensemble_panel(
     ax.grid(True, alpha=0.3)
 
     ax = axes[3, 1]
-    times, mean, std, all_data = _ensemble_struct_ts(
+    times, mean, std, all_data, time_label = _ensemble_struct_ts(
         structural, timestep, 'composition_times', 'mean_composition_mean',
         'mean_composition_std', 'mean_composition_all')
     if times is not None and mean is not None:

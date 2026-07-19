@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 import numpy as np
 import readdy
 
-from .config import SimulationConfig
+from .config import SimulationConfig, format_duration
 from .system import create_system
 logger = logging.getLogger(__name__)
 
@@ -307,7 +307,7 @@ def run_simulation(
         logger.info(f"\n{'=' * 60}")
         logger.info(f"RUNNING SIMULATION")
         logger.info(f"  Particles: {config.n_qt} Qt + {config.n_ft} Ft")
-        logger.info(f"  Duration: {config.total_simulation_time_us:.1f} µs ({config.n_steps:,} steps)")
+        logger.info(f"  Duration: {format_duration(config.total_simulation_time_us * 1e3)} ({config.n_steps:,} steps)")
         logger.info(f"{'=' * 60}\n")
     
     simulation.run(int(config.n_steps), float(config.timestep))
@@ -568,10 +568,9 @@ def run_phased(
         out_file = phase_files[i]
 
         if show_progress:
-            ph_us = phase.n_steps * config.timestep * 1e-3
             logger.info(f"\n{'=' * 60}")
             logger.info(f"PHASE {i + 1}/{len(config.phases)}: {phase.name}")
-            logger.info(f"  {phase.n_steps:,} steps ({ph_us:.1f} µs), "
+            logger.info(f"  {phase.n_steps:,} steps ({format_duration(phase.n_steps * config.timestep)}), "
                         f"binding={phase.binding}, breaking={phase.breaking}, "
                         f"potential={phase.potential_type}")
             logger.info(f"{'=' * 60}\n")
@@ -614,7 +613,7 @@ def run_phased(
         logger.info(f"\n{'=' * 60}")
         logger.info("PHASED RUN COMPLETE")
         logger.info(f"  {len(results)} phases, {step_offset:,} total steps -> "
-                    f"{step_offset * config.timestep * 1e-3:.1f} µs")
+                    f"{format_duration(step_offset * config.timestep)}")
         logger.info(f"{'=' * 60}\n")
 
     # Stitch the per-phase trajectories into one continuous ReaDDy trajectory (kept

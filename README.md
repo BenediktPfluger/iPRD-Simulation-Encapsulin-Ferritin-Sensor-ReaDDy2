@@ -67,6 +67,14 @@ a free Ft. Qt stays multivalent. Default `False` reproduces the original multiva
   distance: `σ = (r_i + r_j) / 2^(1/6) ≈ 0.8909·(r_i + r_j)`, which puts the well minimum at
   `r_i + r_j` = the harmonic bond length. ε is set per pair through a cascade of
   defaults.
+- **Soft harmonic repulsion** (`potential_type="soft"`) is a third mode for reaching much
+  larger timesteps — see **[§12 Soft mode & timestep](#12-soft-mode--reaching-larger-timesteps)**.
+  Instead of the stiff `r⁻¹²` LJ wall, each pair gets ReaDDy's `add_harmonic_repulsion`
+  (a bounded, linear force vanishing at contact `r_i + r_j`), with a **per-pair** force constant
+  `soft.k_QtQt / k_FtFt / k_QtFt` (cluster/mixed pairs cascade, same as the LJ ε cascade;
+  `k = 0` disables a pair). No attractive term. Soft mode is self-contained — `lj.epsilon_*` is
+  **ignored** in soft mode. Because overlaps produce small finite forces (not an `r⁻¹²` blow-up),
+  a far larger stable `dt` is possible.
 - **Harmonic bonds** (`k_bond`) hold bonded particles inside a cluster at equilibrium length
   `r_Qt + r_Ft`.
 
@@ -75,7 +83,10 @@ purely-repulsive **WCA** potential (the `equilibration_potential` config field, 
 `"WCA"`) to relax initial random positions without attraction; production then switches on
 attractions (LJ via `lj.potential_type`) and the binding reactions. This split is handled by
 `equilibrate_system()` + `run_simulation()`. Set `equilibration_potential="LJ"` to equilibrate
-under the full attractive potential instead.
+under the full attractive potential instead. `equilibration_potential` (and each phase's
+`potential_type`) also accepts `"soft"`; in soft mode equilibration is optional altogether
+(harmonic repulsion tolerates initial overlaps), so a soft run can start straight from random
+placement with `run_one(..., skip_equilibration=True)`.
 
 **Deagglomeration & cycling (`config.phases`).** A run can be split into a sequence of *phases*
 to model an **agglomeration ↔ deagglomeration cycle** (e.g. bind for 50 µs, then dissolve for
@@ -113,6 +124,7 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `qtft.comparison` | Cross-ensemble comparison helpers (`compare_ensembles`, `save/load_comparison_data`, `build_comparison_table`, …). |
 | `scripts/analyze_ensemble.py` | CLI to (re)analyze an ensemble directory in parallel; `compare` subcommand. |
 | `scripts/run_replica.py` | CLI to run **one** replica from a config JSON (used locally and by SLURM job arrays). |
+| `scripts/calibrate_timestep.py` | CLI "measure-first" sweep over `(timestep, diffusion)` in **soft** mode: reports stability (finite + bond-length drift), the diffusion criterion, reaction-probability saturation, the largest stable `dt`, and reachable simulated time. See **[§12](#12-soft-mode--reaching-larger-timesteps)**. |
 | `Run_Simulation.ipynb` | Run-only notebook: one **Configuration** cell (all parameters) + one **Run** cell that dispatches on `RUN_MODE` (`single`/`ensemble`) and `ENABLE_DEAGG` (plain vs agglomeration↔deagglomeration cycling); optional SLURM cell. No plotting. |
 | `Plot_Simulation_Results.ipynb` | Plotting/reporting notebook: one **Settings** cell + one **Run** cell selected by `MODE` (`single` trajectory / `ensemble` directory / `comparison` of several). Each mode auto-generates the plots **and** the text summary **and** the data/table exports (CSV/LaTeX) into a `Plots/` folder. |
 
@@ -209,11 +221,12 @@ values — see the footnote.
 | `topology.ft_monovalent` | cap Ft at one bond → single-Qt-star clusters | – | `False` |
 | `topology.koff` | bond-breaking rate per edge (deagglomeration phases only) | 1/ns | 0.0 |
 | `phases` | optional list of `PhaseConfig` for agglomeration↔deagglomeration cycling; `None` = single run | – | `None` |
-| `lj.epsilon_QtQt/FtFt/QtFt` | well depths for the three free pairs | kJ/mol | 1.5 / 1.5 / 3.0 |
-| `lj.potential_type` | `"WCA"` (repulsive) or `"LJ"` (attractive) | – | `LJ` for production |
+| `lj.epsilon_QtQt/FtFt/QtFt` | well depths for the three free pairs (in soft mode: on/off gates only) | kJ/mol | 1.5 / 1.5 / 3.0 |
+| `lj.potential_type` | `"WCA"` (repulsive), `"LJ"` (attractive), or `"soft"` (harmonic repulsion, [§12](#12-soft-mode--reaching-larger-timesteps)) | – | `LJ` for production |
+| `soft.k_QtQt/k_FtFt/k_QtFt` | per-pair harmonic-repulsion stiffness (free-free; cluster/mixed cascade), used only when `potential_type="soft"`; `k=0` disables a pair | kJ/(mol·nm²) | calibrate ([§12](#12-soft-mode--reaching-larger-timesteps)) |
 | `box_size` | cubic box edge | nm | (500, 500, 500) |
 | `temperature` | – | K | 300 |
-| `equilibration_potential` | potential during equilibration (`"WCA"` or `"LJ"`); reactions always off | – | `WCA` |
+| `equilibration_potential` | potential during equilibration (`"WCA"`, `"LJ"`, or `"soft"`); reactions always off | – | `WCA` |
 | `timestep` | integration step | ns | 0.05 (50 ps) |
 | `n_steps` | total steps (→ 100 µs) | – | 2,000,000 |
 | `record_stride`, `observable_stride` | save cadence | steps | 100 |
@@ -463,3 +476,102 @@ here rather than silently fixed:
   (a fast internal cleanup reaction), so it is indistinguishable from an originally-free particle.
   Note: ReaDDy 2.0.13's built-in `add_topology_dissociation` is bypassed (it is broken in that
   build); `qtft` registers an equivalent custom structural reaction instead.
+
+---
+
+## 12. Soft mode — reaching larger timesteps
+
+Production runs use stiff 12-6 Lennard-Jones, whose `r⁻¹²` wall turns any particle overlap
+into an enormous force and so forces a very small timestep (50 ps) for EulerBD stability.
+**Soft mode** (`lj.potential_type="soft"`) replaces that wall with **harmonic repulsion**
+(ReaDDy's `add_harmonic_repulsion`): a bounded, linear force that vanishes at the contact
+distance `r_i + r_j`. Overlaps then produce small finite forces instead of a blow-up, so a
+much larger `dt` is numerically stable. This mirrors the approach of Arkfeld et al.,
+*Whole-cell particle-based digital twin simulations from 4D lattice light-sheet microscopy
+data* (2026; [schoeneberglab/readdy-cell](https://github.com/schoeneberglab/readdy-cell)),
+which reaches minute-scale simulated time with millisecond timesteps.
+
+There is **no attractive term** in soft mode — clustering comes purely from the topology
+binding reactions + harmonic bonds (unchanged). Soft mode is **self-contained**: it reads only
+`config.soft.*` and **ignores `lj.epsilon_*`** entirely (only `lj.potential_type` still selects
+the mode). Each pair has its **own** force constant `soft.k_*` (kJ/(mol·nm²)), so you can stiffen
+the small-particle pairs to stop them overlapping. The thermal overlap scale is
+`δ ≈ √(2·kᵦT / k)`, so a value soft enough for a large `dt` lets small particles interpenetrate —
+raise `k_FtFt` / `k_QtFt` to fix that. Setting any `k = 0` disables that pair. The constants
+follow the **same free → cluster → mixed cascade** as the LJ epsilons (set the three free-free
+values; cluster/mixed derive unless overridden).
+
+```python
+config = sim.SimulationConfig(
+    qt=sim.ParticleConfig("Qt", radius=21.0, diffusion=0.05, cluster_diffusion=0.03),
+    ft=sim.ParticleConfig("Ft", radius=6.0,  diffusion=0.1,  cluster_diffusion=0.07),
+    topology=sim.TopologyConfig(binding_radius=27.25, kon=0.01, k_bond=0.5),
+    lj=sim.LennardJonesConfig(potential_type="soft"),   # <- select soft mode (epsilons ignored)
+    soft=sim.SoftPotentialConfig(k_QtQt=0.2, k_FtFt=1.0, k_QtFt=0.5),  # stiffer for small Ft
+    box_size=(500.0, 500.0, 500.0), timestep=0.5, n_steps=...,
+)
+sim.run_one(config, skip_equilibration=True)   # soft repulsion tolerates initial overlaps
+```
+
+Soft mode round-trips through JSON, works for single runs, phases, and ensembles, and produces
+a distinct `..._soft_kQQ…_kFF…_kQF…_…` filename (the three free-free constants; no `eQQ`, since
+epsilon is unused). Existing WCA/LJ datasets and filenames are unchanged.
+
+### Two things to keep in mind
+
+1. **"Reachable time" is a statement about the model, not physical fidelity.** Reachable time
+   `= n_steps × dt`. The paper reaches minutes because its particles are genuinely µm-scale and
+   slow (`D ≈ 5×10⁻⁶ nm²/ns`). Qt/Ft are nanoscale and really diffuse fast; the per-step
+   displacement `√(2·D·dt)` must stay small (≪ particle radius, and ≪ `binding_radius` for
+   reaction detection), so a larger `dt` requires a **lower `D`**. `D` is a manual config input
+   (no Stokes–Einstein helper) — choose it deliberately, and always report reachable time
+   *together with the assumed `D`*.
+2. **Reaction kinetics degrade at large `dt`.** Binding fires per step with
+   `p = 1 − exp(−kon·dt)`; as `dt` grows, `p → 1` and every contact binds on the first step, so a
+   fast rate can no longer be resolved. The calibration tool reports this and suggests the
+   largest faithful `kon`/`koff` at each `dt`. (The internal retype rate already scales as
+   `1/dt`, so it stays stable automatically.)
+
+Two stability bounds govern the largest usable `dt`:
+
+| Constraint | Bound | Lever |
+|---|---|---|
+| Diffusion / reaction detection | `√(2·D·dt) ≪ r_particle`, `binding_radius` | lower `D` |
+| Harmonic-bond relaxation | `dt ≲ 2·kᵦT / (k_bond·D)` | softer `k_bond`, lower `D` |
+
+The bond-relaxation bound is usually the binding one: with the production `k_bond=10`, bonds
+blow up long before diffusion does. Reaching millisecond `dt` needs a **soft bond**
+(`k_bond ≈ 0.01`, as in the paper) *and* a very low `D` — i.e. genuine further coarse-graining.
+
+### Calibrating (measure-first)
+
+`scripts/calibrate_timestep.py` sweeps `(timestep × diffusion)` in soft mode with short runs and
+reports, per cell: stability (finite positions + bond-length drift vs `r₀`), the diffusion
+criterion `√(2·D·dt)`, per-step reaction saturation, the largest stable `dt`, and the reachable
+time for a step budget. It manages its own output paths (so the `D`-sweep does not collide) and
+can write the full table to CSV.
+
+```bash
+python scripts/calibrate_timestep.py \
+    --timesteps 0.05 0.5 5 50 500 \      # PICOSECONDS
+    --diffusion-scales 1 0.1 0.01 \       # multipliers on base Qt/Ft diffusion
+    --qt-diffusion 0.5 --ft-diffusion 1.0 \
+    --k-bond 0.5 --repulsion-force-constant 5.0 \
+    --kon 0.01 --step-budget 2000000 --output-csv calibration.csv
+```
+
+Key flags: `--k-bond` and `--repulsion-force-constant` (the two softness levers; the latter sets
+the three free-free `soft.k_*` uniformly for the sweep — use a `--config` JSON if you need them to
+differ per pair), `--diffusion-scales`, `--p-target` (per-step probability treated as the
+stochastic limit for the rate guidance), `--step-budget` (steps used for the reachable-time
+column). Review the
+largest-stable-`dt` / reachable-time table **before** committing to a production timescale, then
+decide whether the physics-faithful `dt` is enough or further coarse-graining (softer bond, lower
+`D`, rescaled `kon`/`koff`) is warranted.
+
+### Validating (calibrate-then-predict)
+
+Following the paper's validation pattern: fix parameters in one condition, then run a *second*
+condition (e.g. different particle counts or box size) **without retuning** and check that trends
+hold. Use the existing ensemble machinery (**[§6](#6-running-ensembles)**, `qtft/ensemble.py`)
+for replicate statistics (SEM/SD over 3–4 replicates), exactly as for WCA/LJ runs.

@@ -9,7 +9,7 @@ import os
 
 import numpy as np
 
-from .config import _steps_to_us
+from .config import _steps_to_us, format_duration
 from .analysis import _load_ensemble_files
 
 logger = logging.getLogger(__name__)
@@ -385,7 +385,7 @@ def run_comparison(ensemble_specs: list, output_dir: str):
         logger.info(f"  Replicas: {ens['n_replicas']}")
         logger.info(f"  Time points: {len(ens['times_us'])}")
         if len(ens['times_us']) > 0:
-            logger.info(f"  Duration: {ens['times_us'][-1]:.2f} µs")
+            logger.info(f"  Duration: {format_duration(ens['times_us'][-1] * 1e3)}")
         
         # Print key config parameters
         config = ens['config']

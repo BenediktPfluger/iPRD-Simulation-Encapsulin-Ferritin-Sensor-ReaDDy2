@@ -51,6 +51,7 @@ from .config import (
     SimulationConfig,
     NS_TO_US,
     format_param_string,
+    choose_time_unit,
 )
 from .engine import run_one
 
@@ -1250,7 +1251,8 @@ echo "Analysis completed at $(date)"
             # half_time is stored in nanoseconds, convert to microseconds
             ht_mean_us = m['half_time_mean'] * NS_TO_US
             ht_std_us = m['half_time_std'] * NS_TO_US
-            print(f"  Half-time (t₅₀):    {ht_mean_us:.2f} ± {ht_std_us:.2f} µs")
+            f, unit = choose_time_unit(ht_mean_us)  # one unit for mean±std
+            print(f"  Half-time (t₅₀):    {ht_mean_us * f:.2f} ± {ht_std_us * f:.2f} {unit}")
         
         print(f"\nPercolation (threshold = {m['percolation_threshold']*100:.0f}%):")
         if 'percolation_count' in m:
@@ -1260,7 +1262,8 @@ echo "Analysis completed at $(date)"
                 # percolation_time is stored in nanoseconds, convert to microseconds
                 pt_mean_us = m['percolation_time_mean'] * NS_TO_US
                 pt_std_us = m['percolation_time_std'] * NS_TO_US
-                print(f"  Mean percolation time: {pt_mean_us:.2f} ± {pt_std_us:.2f} µs")
+                f, unit = choose_time_unit(pt_mean_us)  # one unit for mean±std
+                print(f"  Mean percolation time: {pt_mean_us * f:.2f} ± {pt_std_us * f:.2f} {unit}")
         
         print("\n" + "=" * 60)
     
