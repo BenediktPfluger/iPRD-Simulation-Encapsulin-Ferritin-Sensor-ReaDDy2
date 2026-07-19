@@ -1968,9 +1968,11 @@ def convert_h5_to_xyz(
         config.ft.cluster_name: config.ft.radius,
     }
     
-    # First export using ReaDDy's built-in converter to a temporary file
+    # First export using ReaDDy's built-in converter to a temporary file.
+    # generate_tcl=False: we produce an OVITO-friendly XYZ below, not a VMD script, so the
+    # otherwise-default "<temp>.tcl" companion file would just be leftover garbage.
     temp_readdy_file = xyz_file + ".readdy_tmp"
-    traj.convert_to_xyz(temp_readdy_file, particle_radii=radii)
+    traj.convert_to_xyz(temp_readdy_file, particle_radii=radii, generate_tcl=False)
     
     # Build extended XYZ header with box information
     Lx, Ly, Lz = config.box_size
@@ -2071,11 +2073,12 @@ def convert_h5_to_xyz(
             for species, x_str, y_str, z_str, radius in transformed_particles:
                 f_out.write(f"{species}\t{x_str}\t{y_str}\t{z_str}\t{radius}\n")
     
-    # Clean up temporary file
-    try:
-        os.remove(temp_readdy_file)
-    except OSError:
-        pass
+    # Clean up temporary files (the temp XYZ and, defensively, any ReaDDy VMD .tcl script).
+    for tmp in (temp_readdy_file, temp_readdy_file + ".tcl"):
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
     
     logger.info(f"✓ Exported OVITO-friendly XYZ to {xyz_file}")
     
