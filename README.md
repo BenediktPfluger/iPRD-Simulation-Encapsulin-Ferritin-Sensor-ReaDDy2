@@ -1,7 +1,8 @@
-# Qt–Ft Agglomeration Simulation (ReaDDy2)
+# iPRD Simulation of an Encapsulin–Ferritin Sensor (ReaDDy2)
 
-Coarse-grained Brownian-dynamics simulation of **Qt encapsulins (Qt)** and **ferritin (Ft)**
-nanoparticles agglomerating in solution, built on [ReaDDy2](https://readdy.github.io/).
+Coarse-grained **interacting-particle reaction–dynamics (iPRD)** simulation of an
+**encapsulin–ferritin sensor** — **Qt encapsulins (Qt)** and **ferritin (Ft)**
+nanoparticles agglomerating in solution — built on [ReaDDy2](https://readdy.github.io/).
 Two diffusing species bind into growing clusters ("topologies") through stochastic spatial
 reactions; the code measures the resulting **agglomeration kinetics** and **cluster
 morphology**, across single runs and multi-replica ensembles, locally or on a SLURM cluster.
