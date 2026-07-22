@@ -179,7 +179,7 @@ config = sim.SimulationConfig(
     n_steps=2_000_000,    # → 100 µs total
     record_stride=100,
     observable_stride=100,
-    particles_observable_stride=1000,
+    particles_observable_stride=None,   # structural analysis reads positions from the trajectory
     n_qt=600,
     n_ft=50,
 )
@@ -238,7 +238,7 @@ values — see the footnote.
 | `timestep` | integration step | ns | 0.05 (50 ps) |
 | `n_steps` | total steps (→ 100 µs) | – | 2,000,000 |
 | `record_stride`, `observable_stride` | save cadence | steps | 100 |
-| `particles_observable_stride` | per-particle position cadence (`None`=off, saves disk) | steps | 1000 |
+| `particles_observable_stride` | per-particle position cadence. **Optional/redundant** — `None` (default) is recommended: structural/morphology/overlap analyses read positions from the recorded trajectory (`record_stride`). Set an integer only to speed up per-frame structural analysis, at the cost of storing positions twice | steps | `None` |
 | `heavy_observable_stride` | cadence for unread heavy observables (forces, virial); `None`=100×`observable_stride` | steps | optional |
 | `kernel`, `n_threads` | `"CPU"`/`"SingleCPU"`, threads | – | CPU, 4+ |
 | `rng_seed` | RNG seed (per-replica in ensembles) | – | varies |

@@ -30,6 +30,7 @@ Usage:
 from __future__ import annotations
 import logging
 
+import itertools
 import json
 import os
 import warnings
@@ -1501,6 +1502,111 @@ def print_analysis_summary(h5_file: str, config: Optional[SimulationConfig] = No
     
     print("=" * 60 + "\n")
 
+
+def get_min_pair_distances(
+    h5_file: str,
+    config: SimulationConfig,
+    frame: int = -1,
+    trajectory: Optional[readdy.Trajectory] = None,
+) -> Dict[str, Any]:
+    """
+    Minimum center-to-center distance per species pair in a single frame (default: last).
+
+    A quick overlap diagnostic: for each of Qt-Qt, Qt-Ft, Ft-Ft it reports the closest
+    center-to-center distance found (minimum-image convention for the periodic box) and the
+    contact distance (sum of radii). ``min << contact`` means particles are interpenetrating;
+    with the soft/weak potentials a small sub-contact overlap (~sqrt(2*kB*T/k)) is expected.
+    Free and clustered particles are grouped together (Qt = {Qt, QtC}, Ft = {Ft, FtC}).
+
+    Parameters
+    ----------
+    h5_file : str
+        Path to trajectory HDF5 file.
+    config : SimulationConfig
+        Configuration (particle radii/names and box size).
+    frame : int
+        Frame index to analyze (default -1 = last recorded frame).
+    trajectory : readdy.Trajectory, optional
+        Unused placeholder for API symmetry with other analysis functions.
+
+    Returns
+    -------
+    dict with keys:
+        step : int               -- simulation step of the analyzed frame
+        time_us : float          -- that step converted to microseconds
+        pairs : dict             -- {"Qt-Qt"/"Qt-Ft"/"Ft-Ft": {"min","contact",
+                                     "overlap_nm","overlap_frac","n_pairs"}}
+    """
+    data = _extract_frame_data(h5_file, config, verbose=False)
+    if data["n_frames"] == 0:
+        raise ValueError(f"No frames found in {h5_file}")
+    pos = np.asarray(data["positions"][frame])
+    types = list(data["types"][frame])
+    box = np.asarray(config.box_size, dtype=float)
+
+    qt_names = {config.qt.name, config.qt.cluster_name}
+    ft_names = {config.ft.name, config.ft.cluster_name}
+    qt_idx = [i for i, t in enumerate(types) if t in qt_names]
+    ft_idx = [i for i, t in enumerate(types) if t in ft_names]
+
+    def min_dist(ia, ib, same):
+        pairs = itertools.combinations(ia, 2) if same else itertools.product(ia, ib)
+        best = np.inf
+        n = 0
+        for i, j in pairs:
+            if i == j:
+                continue
+            d = pos[i] - pos[j]
+            d -= box * np.round(d / box)          # minimum-image
+            r = float(np.linalg.norm(d))
+            if r < best:
+                best = r
+            n += 1
+        return (best if n else float("nan")), n
+
+    rq, rf = config.qt.radius, config.ft.radius
+    specs = [
+        ("Qt-Qt", qt_idx, qt_idx, True, 2.0 * rq),
+        ("Qt-Ft", qt_idx, ft_idx, False, rq + rf),
+        ("Ft-Ft", ft_idx, ft_idx, True, 2.0 * rf),
+    ]
+    pairs = {}
+    for label, ia, ib, same, contact in specs:
+        mn, n = min_dist(ia, ib, same)
+        overlap = max(contact - mn, 0.0) if mn == mn else float("nan")   # nan-safe
+        pairs[label] = {
+            "min": mn,
+            "contact": contact,
+            "overlap_nm": overlap,
+            "overlap_frac": (overlap / contact) if (contact > 0 and overlap == overlap) else float("nan"),
+            "n_pairs": n,
+        }
+
+    step = int(data["times"][frame]) if len(data["times"]) else 0
+    return {"step": step, "time_us": float(_steps_to_us(step, config.timestep)), "pairs": pairs}
+
+
+def print_min_distance_table(
+    h5_file: str,
+    config: SimulationConfig,
+    frame: int = -1,
+    trajectory: Optional[readdy.Trajectory] = None,
+) -> Dict[str, Any]:
+    """Print the minimum center-to-center distance / overlap table (see get_min_pair_distances)."""
+    res = get_min_pair_distances(h5_file, config, frame=frame, trajectory=trajectory)
+    print("=" * 60)
+    print(f"MINIMUM CENTER-TO-CENTER DISTANCES (frame at t={format_duration(res['time_us'] * 1e3)})")
+    print("=" * 60)
+    print(f"  {'Pair':<7}{'min(nm)':>9}{'contact':>9}{'overlap (nm / %)':>20}")
+    for label, p in res["pairs"].items():
+        if p["min"] != p["min"]:   # nan -> too few particles
+            print(f"  {label:<7}{'n/a':>9}{p['contact']:>9.1f}{'(too few particles)':>20}")
+            continue
+        ov = f"{p['overlap_nm']:.1f} ({100 * p['overlap_frac']:.0f}%)"
+        print(f"  {label:<7}{p['min']:>9.1f}{p['contact']:>9.1f}{ov:>20}")
+    print("  (min < contact => interpenetration; soft/weak potentials allow small sub-contact overlap)")
+    print("=" * 60 + "\n")
+    return res
 
 
 def _get_size_category_boundaries(

@@ -177,9 +177,13 @@ def _register_observables(simulation: readdy.Simulation, config: SimulationConfi
     types = [config.qt.name, config.ft.name, config.qt.cluster_name, config.ft.cluster_name]
     simulation.observe.number_of_particles(stride=stride, types=types)
     
-    # Particle positions and types (optional - for faster structural analysis)
-    # When enabled, allows using read_observable_particles() instead of trajectory.read()
-    # Trade-off: faster analysis but larger HDF5 files (position data stored twice)
+    # Particle positions and types — OPTIONAL speed optimization, redundant by default.
+    # The recorded trajectory (record_trajectory, above) already stores positions, and all
+    # structural analyses read them through analysis._extract_frame_data, which falls back to
+    # trajectory.read() when this observable is absent. So leaving particles_observable_stride
+    # as None (the default) loses no capability — it just avoids storing positions twice.
+    # Set an integer only to speed up per-frame structural analysis (via read_observable_particles)
+    # at the cost of a larger HDF5 file.
     if config.particles_observable_stride is not None:
         simulation.observe.particles(stride=config.particles_observable_stride)
         particles_obs_str = f", particles observable stride={config.particles_observable_stride}"
