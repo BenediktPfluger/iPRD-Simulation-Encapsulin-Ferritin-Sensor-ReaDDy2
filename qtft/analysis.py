@@ -203,9 +203,12 @@ def get_bond_counts(
                     edge_count = 0
                     method_used = "method3_fallback"
                 else:
-                    # No explicit edge info: use n-1. In this model every reaction adds
-                    # exactly one bond and never closes a ring, so clusters are always
-                    # acyclic trees and n_bonds == n_particles - 1 EXACTLY (not an estimate).
+                    # No explicit edge info: use n-1. When allow_loops is False (default),
+                    # every reaction adds exactly one bond and never closes a ring, so clusters
+                    # are acyclic trees and n_bonds == n_particles - 1 EXACTLY. If allow_loops
+                    # is enabled, clusters may contain rings (edges >= n_particles) and this
+                    # fallback would UNDERCOUNT — Methods 1/2 (len(edges)) remain exact and are
+                    # used whenever edge data is readable (essentially always in practice).
                     edge_count = n_particles - 1
                     method_used = "method3_fallback"
                     fallback_used_for_multiparticle = True
@@ -226,8 +229,9 @@ def get_bond_counts(
             primary_method = "Method 2 (topology.graph.edges) - exact count"
             method_type = "exact"
         else:
-            # Clusters are acyclic trees here, so n-1 is exact, not an estimate.
-            primary_method = "Method 3 (n-1, exact for tree clusters)"
+            # n-1 is exact for acyclic (allow_loops=False) tree clusters; with loops it
+            # would undercount, but Methods 1/2 are preferred whenever edges are readable.
+            primary_method = "Method 3 (n-1, exact for tree clusters / allow_loops=False)"
             method_type = "exact"
     else:
         primary_method = "No topologies found"

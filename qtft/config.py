@@ -168,6 +168,14 @@ class TopologyConfig:
         that would give an already-bonded Ft (FtC) a second bond — grow_FtC_Qt and
         merge_QtC_FtC — are not registered, so clusters become single-Qt stars
         (one Qt hub + N monovalent Ft leaves). Default False = fully multivalent.
+    allow_loops : bool
+        If True, allow the merge_QtC_FtC reaction to fire *within* a single cluster
+        (ReaDDy self-fusion), so two already-clustered particles can bond and close a
+        ring — clusters become crosslinked networks instead of acyclic trees. Has effect
+        only when ft_monovalent is False (a leaf Ft cannot form the second bond that
+        closes a loop). Default False reproduces the acyclic-tree model exactly. When
+        enabled, bond-count Methods 1/2 (len(edges)) stay exact, but the n-1 fallback
+        and the "tree" assumption no longer hold. Adds a `_loops` filename tag.
     koff : float
         Bond-breaking (dissociation) rate per edge, used only in deagglomeration
         phases (see SimulationConfig.phases). A topology with n_edges bonds breaks an
@@ -180,6 +188,7 @@ class TopologyConfig:
     k_bond: float = 20.0
     ft_monovalent: bool = False
     koff: float = 0.0
+    allow_loops: bool = False
 
     def __post_init__(self):
         self._validate()
@@ -1028,6 +1037,7 @@ class SimulationConfig:
             k_bond=g(topop, "k_bond", 20.0, "k_bond"),
             ft_monovalent=g(topop, "ft_monovalent", False, "ft_monovalent"),
             koff=g(topop, "koff", 0.0, "koff"),
+            allow_loops=g(topop, "allow_loops", False, "allow_loops"),
         )
         lj = LennardJonesConfig(
             epsilon_QtQt=g(ljp, "epsilon_QtQt", 10.0, "epsilon_QtQt"),
@@ -1154,6 +1164,7 @@ class SimulationConfig:
                 "k_bond": self.topology.k_bond,
                 "ft_monovalent": self.topology.ft_monovalent,
                 "koff": self.topology.koff,
+                "allow_loops": self.topology.allow_loops,
             },
             # Production potential selector (single source of truth)
             "potential_type": self.potential_type,
@@ -1246,6 +1257,7 @@ class SimulationConfig:
             "k_bond": self.topology.k_bond,
             "ft_monovalent": self.topology.ft_monovalent,
             "koff": self.topology.koff,
+            "allow_loops": self.topology.allow_loops,
             "equilibrium_bond_length": self.equilibrium_bond_length,
             # LJ parameters
             "epsilon_QtQt": self.lj.epsilon_QtQt,
@@ -1580,9 +1592,11 @@ def format_param_string(config: "SimulationConfig") -> str:
     # Leading identity block, shared by single and phased runs.
     prefix = f"{config.n_qt}Qt_{config.n_ft}Ft_{config.potential_type}_{coeff}"
 
-    # Additive tag so monovalent-Ft runs don't collide with multivalent ones on disk.
-    # Off by default => suffix absent => existing folder/file names are unchanged.
+    # Additive tags so monovalent-Ft / loop-permitting runs don't collide with the
+    # default ones on disk. Both off by default => suffixes absent => existing
+    # folder/file names are unchanged.
     mono_str = "_FtMono" if config.topology.ft_monovalent else ""
+    loop_str = "_loops" if config.topology.allow_loops else ""
 
     if config.phases:
         # Phased layout: pair kon->agglomeration and koff->deagglomeration with their
@@ -1601,10 +1615,10 @@ def format_param_string(config: "SimulationConfig") -> str:
         if deagg_steps is not None:
             parts.append(f"deaggsteps{int(deagg_steps)}")
         parts.extend([dt_str, time_str])
-        return f"{prefix}_" + "_".join(parts) + mono_str
+        return f"{prefix}_" + "_".join(parts) + loop_str + mono_str
 
-    # Ordinary single run (unchanged).
-    return f"{prefix}_{kon_str}_{dt_str}_{time_str}{mono_str}"
+    # Ordinary single run (unchanged when allow_loops/ft_monovalent are default).
+    return f"{prefix}_{kon_str}_{dt_str}_{time_str}{loop_str}{mono_str}"
 
 
 # =============================================================================

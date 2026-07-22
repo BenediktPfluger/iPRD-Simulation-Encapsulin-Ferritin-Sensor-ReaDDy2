@@ -61,6 +61,16 @@ valence is governed purely by which particle types appear as reactants. In both 
 every Ft forms **at most one bond**. Clusters then become **single-Qt stars** (one multivalent Qt + N monovalent Ft leaves): two clusters never merge, and a free Qt joins only by seeding with
 a free Ft. Qt stays multivalent. Default `False` reproduces the original multivalent model.
 
+**Loop-permitting binding (`topology.allow_loops`, default `False`).** All four reactions are
+ReaDDy *fusions* between two **different** topologies, so a bond never forms between two particles
+already in the same cluster — clusters are strictly **acyclic trees** (see §11). Only
+`merge_QtC_FtC` ever has both partners already clustered (`seed`/`grow_*` always consume a *free*
+monomer), so setting `allow_loops=True` registers just that one reaction with ReaDDy's `[self=true]`
+flag, letting it fire **within** a cluster. Two already-clustered particles can then bond and close
+a **ring**, turning clusters into crosslinked networks rather than trees. It has effect only when
+`ft_monovalent=False` (a leaf Ft cannot form the second bond that closes a loop), and adds a
+`_loops` filename tag. Default `False` reproduces the acyclic-tree model exactly.
+
 **Potentials.**
 - **Pairwise Lennard-Jones** for excluded volume, registered for all 10 type pairs.
   `potential_type="WCA"` → purely repulsive (cutoff `2^(1/6)·σ`); `"LJ"` → full attractive
@@ -226,6 +236,7 @@ values — see the footnote.
 | `topology.kon` | binding rate | nm³/(ns·part) | 0.001 |
 | `topology.k_bond` | harmonic bond stiffness | kJ/(mol·nm²) | 10.0 |
 | `topology.ft_monovalent` | cap Ft at one bond → single-Qt-star clusters | – | `False` |
+| `topology.allow_loops` | let `merge_QtC_FtC` self-fuse → intra-cluster loops (crosslinked networks, not trees); needs `ft_monovalent=False`; adds `_loops` tag | – | `False` |
 | `topology.koff` | bond-breaking rate per edge (deagglomeration phases only) | 1/ns | 0.0 |
 | `phases` | optional list of `PhaseConfig` for agglomeration↔deagglomeration cycling; `None` = single run | – | `None` |
 | `lj.epsilon_QtQt/FtFt/QtFt` | well depths for the three free pairs (in soft mode: on/off gates only) | kJ/mol | 1.5 / 1.5 / 3.0 |
@@ -425,7 +436,8 @@ binding rate kon=0.001, 50 ps timestep, 100 µs total.
 
 When `topology.ft_monovalent=True`, a `_FtMono` suffix is appended (e.g.
 `…_dt50ps_100us_FtMono`) so monovalent and multivalent runs at otherwise-identical parameters
-don't collide on disk. The suffix is absent by default, so existing names are unchanged.
+don't collide on disk. Likewise `topology.allow_loops=True` appends a `_loops` suffix (before
+`_FtMono`). Both suffixes are absent by default, so existing names are unchanged.
 
 When `config.phases` is set (agglomeration↔deagglomeration cycling), the tail after the shared
 identity block is replaced by a phase-specific layout (the `kon…dt…` tail above is not used):
@@ -441,8 +453,8 @@ the leading block is identical to a single run; then `phases{N}` is the number o
 the first deagglomeration phase); `{total_time}us` is the **sum** over all phases. A phased run's
 outputs live under a directory derived from this name, with one `phase_NNN/trajectory.h5` per
 phase (+ a `phase_NNN/checkpoints/` used to hand off state to the next phase). For ordinary single
-runs (`phases=None`) the standard `kon…dt…` layout above is unchanged. `_FtMono` is still appended
-last when `topology.ft_monovalent=True`.
+runs (`phases=None`) the standard `kon…dt…` layout above is unchanged. `_loops` (when
+`topology.allow_loops=True`) then `_FtMono` (when `topology.ft_monovalent=True`) are appended last.
 
 After all phases, `run_phased` auto-writes a single **`trajectory_combined.h5`** in the run
 directory: the per-phase trajectories stitched onto one continuous step axis (the duplicated
@@ -474,9 +486,13 @@ here rather than silently fixed:
 - **Diffusion ratio is not Stokes–Einstein consistent.** The Qt/Ft `D` values are a
   coarse-graining choice and do not follow `D ∝ 1/r` from the radii; this is intentional, noted
   here to avoid confusion.
-- **Cluster bond graphs are spanning trees.** Every reaction adds exactly one bond and never closes
-  a ring, so clusters are acyclic (`n_bonds = n_particles − 1`); coordination numbers from the bond
-  graph reflect that tree, not true spatial contact coordination.
+- **Cluster bond graphs are spanning trees (when `allow_loops=False`, the default).** Every
+  reaction is an inter-topology fusion that adds exactly one bond and never closes a ring, so
+  clusters are acyclic (`n_bonds = n_particles − 1`); coordination numbers from the bond graph
+  reflect that tree, not true spatial contact coordination. Setting `topology.allow_loops=True`
+  lets `merge_QtC_FtC` self-fuse, so intra-cluster rings can form (`n_bonds ≥ n_particles`) and the
+  clusters become crosslinked networks — bond counts stay exact (edge counts), but the tree
+  identity no longer holds.
 - **Bond breaking (`koff`) is a mean-field per-edge rate.** Each existing bond breaks at the
   same rate `koff` regardless of its location in the cluster (interior vs leaf) or local geometry;
   the broken edge is chosen uniformly at random, not by force or strain. It is a microscopic

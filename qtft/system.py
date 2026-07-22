@@ -340,13 +340,18 @@ def _add_topologies(
              f"{topo.name}({qtc}) + {topo.name}({ft}) -> {topo.name}({qtc}--{ftc})"),
         ]
         if not topo.ft_monovalent:
+            # allow_loops lets merge_QtC_FtC fire *within* one cluster (ReaDDy self-fusion),
+            # so two already-clustered particles can bond and close a ring. Applied to the
+            # merge reaction only: seed/grow always consume a free monomer (its own singleton
+            # topology) and so are inherently inter-topology and can never close a loop.
+            self_suffix = " [self=true]" if topo.allow_loops else ""
             reactions += [
                 # Growth: FtC + Qt -> FtC--QtC
                 (f"grow_FtC_Qt_{topo.name}",
                  f"{topo.name}({ftc}) + {topo.name}({qt}) -> {topo.name}({ftc}--{qtc})"),
-                # Merging: QtC + FtC -> QtC--FtC
+                # Merging: QtC + FtC -> QtC--FtC  (self-fusion enabled when allow_loops)
                 (f"merge_QtC_FtC_{topo.name}",
-                 f"{topo.name}({qtc}) + {topo.name}({ftc}) -> {topo.name}({qtc}--{ftc})"),
+                 f"{topo.name}({qtc}) + {topo.name}({ftc}) -> {topo.name}({qtc}--{ftc}){self_suffix}"),
             ]
 
         for name, descriptor in reactions:
@@ -363,7 +368,8 @@ def _add_topologies(
     bits = []
     if register_binding:
         bits.append(f"{n_binding} binding spatial reactions (kon={topo.kon}, "
-                    f"binding_radius={topo.binding_radius} nm, ft_monovalent={topo.ft_monovalent})")
+                    f"binding_radius={topo.binding_radius} nm, ft_monovalent={topo.ft_monovalent}, "
+                    f"allow_loops={topo.allow_loops})")
     if register_breaking:
         bits.append(f"dissociation (koff={topo.koff}) + freed-monomer re-typing")
     if not bits:
