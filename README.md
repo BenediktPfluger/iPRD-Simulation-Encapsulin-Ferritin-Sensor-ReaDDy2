@@ -142,12 +142,14 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `qtft.analysis` | Matplotlib-free trajectory analysis: cluster stats, bond counts, binding kinetics, morphology (Rg), spatial distribution, contacts, composition, size fractions. Also `convert_h5_to_xyz` (OVITO), `load_ensemble_data`, and numeric results tables (`build_final_state_table`, `save_table_files`). |
 | `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_ensemble_panel` / `plot_comparison_panel` (each writes paired SVG + PNG via `save_path_base`). |
 | `qtft.comparison` | Cross-ensemble comparison helpers (`compare_ensembles`, `save/load_comparison_data`, `build_comparison_table`, …). |
+| `qtft.fibsem_export` | Export the **final frame** to the FIB-SEM segmentation schema for experiment comparison: encapsulin (Qt/QtC) centroids with ground-truth cluster IDs. Read-only — it consumes a finished trajectory and never runs a simulation. See **[§13](#13-fib-sem-comparison-export)**. |
 | `scripts/analyze_ensemble.py` | CLI to (re)analyze an ensemble directory in parallel; `compare` subcommand. |
 | `scripts/run_replica.py` | CLI to run **one** replica from a config JSON (used locally and by SLURM job arrays). |
 | `scripts/calibrate_timestep.py` | CLI "measure-first" sweep over `(timestep, diffusion)` in **soft** mode: reports stability (finite + bond-length drift), the diffusion criterion, reaction-probability saturation, the largest stable `dt`, and reachable simulated time. See **[§12](#12-soft-mode--reaching-larger-timesteps)**. |
 | `scripts/calibrate_soft_k.py` | CLI sweep over the **soft**-mode force constants `soft.k_*`: measures interpenetration (via `analysis.get_overlap_statistics`) against numerical stability, reported with the per-step overshoot ratio `alpha = k·D·dt/(kB·T)`. See **[§12](#12-soft-mode--reaching-larger-timesteps)**. |
 | `Run_Simulation.ipynb` | Run-only notebook: one **Configuration** cell (all parameters) + one **Run** cell that dispatches on `RUN_MODE` (`single`/`ensemble`) and `ENABLE_DEAGG` (plain vs agglomeration↔deagglomeration cycling); optional SLURM cell. No plotting. |
 | `Plot_Simulation_Results.ipynb` | Plotting/reporting notebook: one **Settings** cell + one **Run** cell selected by `MODE` (`single` trajectory / `ensemble` directory / `comparison` of several). Each mode auto-generates the plots **and** the text summary **and** the data/table exports (CSV/LaTeX) into a `Plots/` folder. |
+| `Export_for_FIB-SEM_Comparison.ipynb` | Export notebook: points at a finished run, writes the encapsulin centroid CSV + metadata JSON in the FIB-SEM schema, and plots a cluster-coloured scatter as a periodic-unwrap sanity check. See **[§13](#13-fib-sem-comparison-export)**. |
 
 ---
 
@@ -694,3 +696,59 @@ Following the paper's validation pattern: fix parameters in one condition, then 
 condition (e.g. different particle counts or box size) **without retuning** and check that trends
 hold. Use the existing ensemble machinery (**[§6](#6-running-ensembles)**, `qtft/ensemble.py`)
 for replicate statistics (SEM/SD over 3–4 replicates), exactly as for WCA/LJ runs.
+
+---
+
+## 13. FIB-SEM comparison export
+
+To compare a simulated end state against **FIB-SEM** segmentation data, `qtft.fibsem_export`
+writes the **final frame** in the same schema the segmentation pipeline produces, so a
+simulation drops straight into the existing experimental analysis. It is **read-only**: it
+consumes a finished trajectory and never builds or runs a simulation.
+
+Driven from `Export_for_FIB-SEM_Comparison.ipynb` (a settings cell, a run cell, and a
+cluster-coloured scatter as a visual unwrap check), or directly:
+
+```python
+from qtft.config import SimulationConfig
+from qtft import fibsem_export
+
+traj, cfg_path = fibsem_export.find_run_files("Simulation_Files_Single_Runs/<run_dir>")
+config = SimulationConfig.load_json(cfg_path)
+df, info = fibsem_export.export(traj, config, "FIBSEM_Comparison_Export", voxel_nm=4.0)
+```
+
+`find_run_files` resolves the run layouts used here: a plain run (`trajectory.h5`), a phased
+agglomeration↔deagglomeration run (`trajectory_combined.h5`, else the last
+`phase_NNN/trajectory.h5`), and the matching config (`<param_string>_config.json`, or
+`ensemble_config.json` for an ensemble replica).
+
+**What it extracts.**
+
+- **Encapsulins only.** Qt (free) and QtC (bound) are exported; ferritin is sub-resolution in
+  FIB-SEM and is dropped — but it still takes part in the periodic unwrap, since it defines
+  the Qt–Ft–Qt connectivity of a cluster.
+- **Clusters are ground truth**, taken from ReaDDy's topology graph — one topology = one
+  cluster, so no DBSCAN is needed on the simulation side. Because every particle is placed as
+  its own single-particle topology (`engine.place_particles`), boundness is read off the
+  graph: a topology with more than one particle means its encapsulin is bonded (a Qt–Ft dimer
+  counts), while a size-1 topology is an unbound encapsulin, i.e. a FIB-SEM singleton.
+- **Positions are PBC-unwrapped per cluster**, then shifted so the minimum corner sits at the
+  origin (all coordinates ≥ 0).
+- **Volumes are analytical** (4/3·π·r³), and `radius_nm` is stored per row so a later notebook
+  can compute an exact mass integral ⟨M(R)⟩ from ball–ball intersections, with no voxelisation.
+
+**Outputs** (into the chosen `out_dir`, suffixed with `file_tag`, default `_simulation`):
+
+| File | Format | Contents |
+|------|--------|----------|
+| `encapsulin_centroids_simulation.csv` | CSV | one row per encapsulin: `label, z/y/x_nm, z/y/x_vox, radius_nm, volume_nm3, cluster, is_clustered` |
+| `structural_information_and_metadata_simulation.json` | JSON | source trajectory, final step / µs, encapsulin and cluster counts, cluster-size histogram, box, applied coordinate offset, and the full flattened config |
+
+> **Caveat — periodicity is not preserved.** Each cluster is unwrapped independently and then
+> everything is shifted by one global offset. Within a cluster the geometry is exact, but
+> between clusters periodicity is gone: a cluster unwrapped past the boundary can end up
+> spatially overlapping another, and the bounding volume exceeds the true box. That is
+> harmless for per-cluster shape/size statistics, but it biases any metric that samples
+> neighbourhoods *across* clusters (⟨M(R)⟩, RDF). Decide deliberately whether such a metric
+> should be computed under PBC before the unwrap.
