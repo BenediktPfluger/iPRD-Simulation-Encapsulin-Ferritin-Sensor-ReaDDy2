@@ -1331,7 +1331,9 @@ class SimulationConfig:
         print(f"  Counts: {self.n_qt} Qt + {self.n_ft} Ft = {self.n_qt + self.n_ft} total")
         print(f"\nTopology:")
         print(f"  Binding radius: {self.topology.binding_radius} nm")
-        print(f"  Binding rate (kon): {self.topology.kon} nm³/(ns·part)")
+        # kon is passed straight to ReaDDy's spatial-reaction rate: a per-pair 1/time
+        # rate, not the macroscopic nm³/(ns·particle) constant the old label implied.
+        print(f"  Binding rate (kon): {self.topology.kon} 1/ns")
         print(f"  Bond-breaking rate (koff): {self.topology.koff} /(edge·ns)")
         print(f"  Bond stiffness: {self.topology.k_bond} kJ/(mol·nm²)")
         print(f"  Equilibrium bond length: {self.equilibrium_bond_length} nm")

@@ -18,8 +18,9 @@ configure ─▶ equilibrate (WCA, no reactions) ─▶ production (LJ + reactio
   <img src="docs/images/simulation_timeseries.png" alt="Qt–Ft agglomeration over time: initially dispersed Qt (green) and Ft (purple) particles bind into growing clusters (QtC blue, FtC red) by 100 µs" width="100%">
 </p>
 
-<p align="center"><em>A single 100 µs run (OVITO render): free Qt (green) and Ft (purple) start dispersed and
-progressively bind into growing clusters of QtC (blue) and FtC (red). Bottom row is a zoomed detail.</em></p>
+<p align="center"><em>A single 100 µs run in the earlier LJ setup (OVITO render): free Qt (green) and Ft (purple) start
+dispersed and progressively bind into growing clusters of QtC (blue) and FtC (red). Bottom row is a
+zoomed detail. The current preset (§5) uses soft mode to reach far longer simulated times.</em></p>
 
 ---
 
@@ -178,30 +179,37 @@ import qtft as sim
 import qtft.analysis as analysis
 import qtft.plotting as plotting
 
-# 1. Configure (current standard values)
+# 1. Configure (the current notebook preset — soft mode, see §5 and §12)
 config = sim.SimulationConfig(
-    qt=sim.ParticleConfig("Qt", radius=21.0, diffusion=0.5, cluster_diffusion=0.3),
-    ft=sim.ParticleConfig("Ft", radius=6.0, diffusion=1.0, cluster_diffusion=0.7),
-    topology=sim.TopologyConfig(binding_radius=27.25, kon=0.001, k_bond=10.0),
-    potential_type="LJ",        # top-level selector: "WCA" | "LJ" | "soft" | "weak"
-    lj=sim.LennardJonesConfig(epsilon_QtQt=1.5, epsilon_FtFt=1.5, epsilon_QtFt=3.0),
+    qt=sim.ParticleConfig("Qt", radius=25.0, diffusion=2e-4, cluster_diffusion=2e-4),
+    ft=sim.ParticleConfig("Ft", radius=7.0, diffusion=5e-4, cluster_diffusion=5e-4),
+    topology=sim.TopologyConfig(binding_radius=32.0, kon=1e-6, k_bond=1.0,
+                                allow_loops=True),
+    potential_type="soft",      # top-level selector: "WCA" | "LJ" | "soft" | "weak"
+    soft=sim.SoftPotentialConfig(k_QtQt=4.0, k_FtFt=3.0, k_QtFt=1.5),
+    equilibration_potential="soft",   # WCA/LJ would blow up at this dt
     box_size=(500.0, 500.0, 500.0),
     temperature=300.0,
-    timestep=0.05,        # ns  (=50 ps)
-    n_steps=2_000_000,    # → 100 µs total
+    timestep=1e3,         # ns  (=1 µs)
+    n_steps=750_000,      # → 750 ms total
     record_stride=100,
     observable_stride=100,
     particles_observable_stride=None,   # structural analysis reads positions from the trajectory
-    n_qt=600,
-    n_ft=50,
+    n_qt=200,
+    n_ft=400,
 )
 
-# 2. Equilibrate (WCA, no reactions) → 3. build → 4. place → 5. run (LJ + reactions)
-pos_qt, pos_ft = sim.equilibrate_system(config, n_steps=10000)
-system     = sim.create_system(config)
-simulation = sim.create_simulation(system, config, overwrite=True)
-sim.place_particles(simulation, config, positions_qt=pos_qt, positions_ft=pos_ft)
-trajectory = sim.run_simulation(simulation, config)
+# 2. Run. Soft repulsion tolerates initial overlaps, so equilibration is optional:
+trajectory = sim.run_one(config, skip_equilibration=True)
+
+# ...or drive the same steps explicitly (equilibrate → build → place → run). With an
+# attractive production potential ("LJ"), equilibrate first under the repulsive
+# equilibration_potential to relax the random starting positions:
+# pos_qt, pos_ft = sim.equilibrate_system(config, n_steps=10000)
+# system     = sim.create_system(config)
+# simulation = sim.create_simulation(system, config, overwrite=True)
+# sim.place_particles(simulation, config, positions_qt=pos_qt, positions_ft=pos_ft)
+# trajectory = sim.run_simulation(simulation, config)
 
 # 6. Analyze + plot
 analysis.print_analysis_summary(config.output_file, config)
@@ -223,38 +231,43 @@ config.save_json("simulation_config.json")
 fully JSON-serializable (`config.save_json(...)` / `SimulationConfig.load_json(...)`,
 `from_dict` / `to_dict` / `to_flat_dict`).
 
-The table below leads with the **current standard values used in the real runs** (the values in the notebook). The code dataclass defaults are small smoke-test
-values — see the footnote.
+The table below leads with the **current values in `Run_Simulation.ipynb`** — the soft-mode,
+750 ms preset. The code dataclass defaults are small smoke-test values — see the footnote.
 
-| Parameter | Meaning | Units | Standard value |
+> The ensembles in `Different_Particle_Ratios/` predate this preset: they were produced with
+> the earlier **LJ** parameters (50 ps timestep, 100 µs, Qt r=21 / Ft r=6). Each dataset's
+> exact parameters are recorded in its own `ensemble_config.json`, and are encoded in its
+> directory name (§10).
+
+| Parameter | Meaning | Units | Notebook value |
 |-----------|---------|-------|----------------|
-| `qt.radius`, `qt.diffusion` | Qt encapsulin size & diffusion | nm, nm²/ns | 21.0, 0.5 |
-| `qt.cluster_diffusion` | Qt diffusion once bound in a cluster | nm²/ns | 0.3 |
-| `ft.radius`, `ft.diffusion` | Ft ferritin size & diffusion | nm, nm²/ns | 6.0, 1.0 |
-| `ft.cluster_diffusion` | Ft diffusion once bound in a cluster | nm²/ns | 0.7 |
-| `n_qt`, `n_ft` | particle counts | – | swept: 200–600 / 50–2000 (notebook: 600 / 50) |
-| `topology.binding_radius` | reaction capture distance | nm | 27.25 (≈ r_Qt+r_Ft+buffer) |
-| `topology.kon` | binding rate | nm³/(ns·part) | 0.001 |
-| `topology.k_bond` | harmonic bond stiffness | kJ/(mol·nm²) | 10.0 |
+| `qt.radius`, `qt.diffusion` | Qt encapsulin size & diffusion | nm, nm²/ns | 25.0, 2e-4 |
+| `qt.cluster_diffusion` | Qt diffusion once bound in a cluster | nm²/ns | 2e-4 (= monomer, see §11) |
+| `ft.radius`, `ft.diffusion` | Ft ferritin size & diffusion | nm, nm²/ns | 7.0, 5e-4 |
+| `ft.cluster_diffusion` | Ft diffusion once bound in a cluster | nm²/ns | 5e-4 (= monomer, see §11) |
+| `n_qt`, `n_ft` | particle counts | – | 200 / 400 |
+| `topology.binding_radius` | reaction capture distance | nm | 32.0 (= r_Qt+r_Ft, i.e. contact) |
+| `topology.kon` | microscopic binding rate (per-pair; see §11) | 1/ns | 1e-6 |
+| `topology.k_bond` | harmonic bond stiffness | kJ/(mol·nm²) | 1.0 (soft, for the large `dt`) |
 | `topology.ft_monovalent` | cap Ft at one bond → single-Qt-star clusters | – | `False` |
-| `topology.allow_loops` | let `merge_QtC_FtC` self-fuse → intra-cluster loops (crosslinked networks, not trees); needs `ft_monovalent=False`; adds `_loops` tag | – | `False` |
+| `topology.allow_loops` | let `merge_QtC_FtC` self-fuse → intra-cluster loops (crosslinked networks, not trees); needs `ft_monovalent=False`; adds `_loops` tag | – | `True` |
 | `topology.koff` | bond-breaking rate per edge (deagglomeration phases only) | 1/ns | 0.0 |
 | `phases` | optional list of `PhaseConfig` for agglomeration↔deagglomeration cycling; `None` = single run | – | `None` |
-| `lj.epsilon_QtQt/FtFt/QtFt` | well depths for the three free pairs (in soft mode: on/off gates only) | kJ/mol | 1.5 / 1.5 / 3.0 |
-| `potential_type` | **top-level** production selector: `"WCA"` (repulsive), `"LJ"` (attractive), `"soft"` (harmonic repulsion, [§12](#12-soft-mode--reaching-larger-timesteps)), or `"weak"` (piecewise-harmonic weak interaction). Picks which block is registered (`lj.epsilon_*` / `soft.k_*` / `weak.k_*,depth_*`); the others are ignored | – | `LJ` for production |
-| `soft.k_QtQt/k_FtFt/k_QtFt` | per-pair harmonic-repulsion stiffness (free-free; cluster/mixed cascade), used only when `potential_type="soft"`; `k=0` disables a pair | kJ/(mol·nm²) | calibrate ([§12](#12-soft-mode--reaching-larger-timesteps)) |
-| `weak.k_QtQt/…` / `weak.depth_QtQt/…` | per-pair force constant + well depth for `potential_type="weak"` (free-free; cluster/mixed cascade); `k=0` disables a pair | kJ/(mol·nm²), kJ/mol | calibrate |
-| `weak.cutoff_factor` | weak-mode cutoff as a multiple of contact (`cutoff = factor × (r_i+r_j)`, must be > 1) | – | 2.0 |
+| `lj.epsilon_QtQt/FtFt/QtFt` | well depths for the three free pairs — **ignored in soft mode** | kJ/mol | 1.5 / 1.5 / 3.0 (unused) |
+| `potential_type` | **top-level** production selector: `"WCA"` (repulsive), `"LJ"` (attractive), `"soft"` (harmonic repulsion, [§12](#12-soft-mode--reaching-larger-timesteps)), or `"weak"` (piecewise-harmonic weak interaction). Picks which block is registered (`lj.epsilon_*` / `soft.k_*` / `weak.k_*,depth_*`); the others are ignored | – | `soft` |
+| `soft.k_QtQt/k_FtFt/k_QtFt` | per-pair harmonic-repulsion stiffness (free-free; cluster/mixed cascade), used only when `potential_type="soft"`; `k=0` disables a pair | kJ/(mol·nm²) | 4.0 / 3.0 / 1.5 (calibrated, [§12](#12-soft-mode--reaching-larger-timesteps)) |
+| `weak.k_QtQt/…` / `weak.depth_QtQt/…` | per-pair force constant + well depth for `potential_type="weak"` (free-free; cluster/mixed cascade); `k=0` disables a pair | kJ/(mol·nm²), kJ/mol | 0.5 / 3.0 / 2.0 and 0.25 / 0.1 / 8.0 (unused in soft mode) |
+| `weak.cutoff_factor` | weak-mode cutoff as a multiple of contact (`cutoff = factor × (r_i+r_j)`, must be > 1) | – | 1.1 |
 | `box_size` | cubic box edge | nm | (500, 500, 500) |
 | `temperature` | – | K | 300 |
-| `equilibration_potential` | potential during equilibration (`"WCA"`, `"LJ"`, or `"soft"`); reactions always off | – | `WCA` |
-| `timestep` | integration step | ns | 0.05 (50 ps) |
-| `n_steps` | total steps (→ 100 µs) | – | 2,000,000 |
+| `equilibration_potential` | potential during equilibration (`"WCA"`, `"LJ"`, `"soft"`, or `"weak"`); reactions always off | – | `soft` (must be soft/weak at this `dt`) |
+| `timestep` | integration step | ns | 1e3 (1 µs) |
+| `n_steps` | total steps (→ 750 ms) | – | 750,000 |
 | `record_stride`, `observable_stride` | save cadence | steps | 100 |
 | `particles_observable_stride` | per-particle position cadence. **Optional/redundant** — `None` (default) is recommended: structural/morphology/overlap analyses read positions from the recorded trajectory (`record_stride`). Set an integer only to speed up per-frame structural analysis, at the cost of storing positions twice | steps | `None` |
 | `heavy_observable_stride` | cadence for unread heavy observables (forces, virial); `None`=100×`observable_stride` | steps | optional |
-| `kernel`, `n_threads` | `"CPU"`/`"SingleCPU"`, threads | – | CPU, 4+ |
-| `rng_seed` | RNG seed (per-replica in ensembles) | – | varies |
+| `kernel`, `n_threads` | `"CPU"`/`"SingleCPU"`, threads. Note: with `n_threads > 1` runs are **not** reproducible from the seed | – | CPU, 4 |
+| `rng_seed` | RNG seed (per-replica in ensembles) | – | 22 |
 | `output_file` | trajectory path (`None` = auto) | – | auto |
 
 > **Code dataclass defaults** (smoke-test only, *not* the real runs): Qt r=1.0 D=5.0,
@@ -451,6 +464,12 @@ Example — `600Qt_50Ft_LJ_eQQ1.5_eFF1.5_eQF3_kon0.001_dt50ps_100us`:
 600 Qt + 50 Ft, full LJ potential, ε(QtQt)=1.5 / ε(FtFt)=1.5 / ε(QtFt)=3.0 kJ/mol,
 binding rate kon=0.001, 50 ps timestep, 100 µs total.
 
+In **soft** mode the epsilon block is replaced by the three free–free force constants (ε is
+unused there), and the timestep/duration units adapt to the scale — the current notebook
+preset produces `200Qt_400Ft_soft_kQQ4_kFF3_kQF1.5_kon1e-06_dt1us_750ms_loops`:
+200 Qt + 400 Ft, soft mode with k(QtQt)=4 / k(FtFt)=3 / k(QtFt)=1.5 kJ/(mol·nm²),
+kon=1e-6, 1 µs timestep, 750 ms total, with intra-cluster loops enabled.
+
 When `topology.ft_monovalent=True`, a `_FtMono` suffix is appended (e.g.
 `…_dt50ps_100us_FtMono`) so monovalent and multivalent runs at otherwise-identical parameters
 don't collide on disk. Likewise `topology.allow_loops=True` appends a `_loops` suffix (before
@@ -494,9 +513,11 @@ These are deliberate simplifications / open questions in the current physical mo
 here rather than silently fixed:
 
 - **Cluster diffusion is a single fixed value, not size-dependent.** `ParticleConfig.cluster_diffusion`
-  defaults to the monomer `diffusion`; clusters still do not slow down as `D ∝ 1/R`. The current
-  standard config sets it explicitly (Qt 0.3, Ft 0.7 nm²/ns), so bound particles diffuse slower than
-  free monomers, but the value is constant regardless of cluster size.
+  defaults to the monomer `diffusion`, and clusters do not slow down as `D ∝ 1/R`. The current
+  notebook preset sets it **equal to the monomer value** (Qt 2e-4, Ft 5e-4 nm²/ns), so bound
+  particles diffuse at the same rate as free ones. The knob to make bound particles slower exists
+  — set `cluster_diffusion` below `diffusion` — but it is a single constant regardless of cluster
+  size, so it cannot reproduce the size dependence.
 - **`kon` is a microscopic rate.** It is passed straight to ReaDDy's spatial-reaction `rate`
   (a per-pair `1/time` rate), not the macroscopic `nm³/(ns·particle)` constant the older label
   implied. Treat the swept `kon` values as microscopic rates.
@@ -523,8 +544,10 @@ here rather than silently fixed:
 
 ## 12. Soft mode — reaching larger timesteps
 
-Production runs use stiff 12-6 Lennard-Jones, whose `r⁻¹²` wall turns any particle overlap
-into an enormous force and so forces a very small timestep (50 ps) for EulerBD stability.
+Soft mode is what the notebook runs today; this section explains why. The earlier production
+setup used stiff 12-6 Lennard-Jones, whose `r⁻¹²` wall turns any particle overlap into an
+enormous force and so forced a very small timestep (50 ps) for EulerBD stability — capping a
+run at ~100 µs of simulated time (the `Different_Particle_Ratios/` datasets).
 **Soft mode** (`potential_type="soft"`) replaces that wall with **harmonic repulsion**
 (ReaDDy's `add_harmonic_repulsion`): a bounded, linear force that vanishes at the contact
 distance `r_i + r_j`. Overlaps then produce small finite forces instead of a blow-up, so a
@@ -545,12 +568,13 @@ values; cluster/mixed derive unless overridden).
 
 ```python
 config = sim.SimulationConfig(
-    qt=sim.ParticleConfig("Qt", radius=21.0, diffusion=0.05, cluster_diffusion=0.03),
-    ft=sim.ParticleConfig("Ft", radius=6.0,  diffusion=0.1,  cluster_diffusion=0.07),
-    topology=sim.TopologyConfig(binding_radius=27.25, kon=0.01, k_bond=0.5),
+    qt=sim.ParticleConfig("Qt", radius=25.0, diffusion=2e-4, cluster_diffusion=2e-4),
+    ft=sim.ParticleConfig("Ft", radius=7.0,  diffusion=5e-4, cluster_diffusion=5e-4),
+    topology=sim.TopologyConfig(binding_radius=32.0, kon=1e-6, k_bond=1.0),
     potential_type="soft",   # <- top-level selector (epsilons/lj ignored in soft mode)
-    soft=sim.SoftPotentialConfig(k_QtQt=0.2, k_FtFt=1.0, k_QtFt=0.5),  # stiffer for small Ft
-    box_size=(500.0, 500.0, 500.0), timestep=0.5, n_steps=...,
+    soft=sim.SoftPotentialConfig(k_QtQt=4.0, k_FtFt=3.0, k_QtFt=1.5),  # calibrated, see below
+    equilibration_potential="soft",
+    box_size=(500.0, 500.0, 500.0), timestep=1e3, n_steps=750_000,
 )
 sim.run_one(config, skip_equilibration=True)   # soft repulsion tolerates initial overlaps
 ```
@@ -581,9 +605,10 @@ Two stability bounds govern the largest usable `dt`:
 | Diffusion / reaction detection | `√(2·D·dt) ≪ r_particle`, `binding_radius` | lower `D` |
 | Harmonic-bond relaxation | `dt ≲ 2·kᵦT / (k_bond·D)` | softer `k_bond`, lower `D` |
 
-The bond-relaxation bound is usually the binding one: with the production `k_bond=10`, bonds
-blow up long before diffusion does. Reaching millisecond `dt` needs a **soft bond**
-(`k_bond ≈ 0.01`, as in the paper) *and* a very low `D` — i.e. genuine further coarse-graining.
+The bond-relaxation bound is usually the binding one: at the stiff bond of the old LJ setup
+(`k_bond=10`) bonds blow up long before diffusion does. This is why the current preset pairs a
+**soft bond** (`k_bond=1.0`) with a much lower `D` (Qt 2e-4, Ft 5e-4 nm²/ns) — the µs timestep
+is bought with genuine further coarse-graining, not for free.
 
 ### Calibrating (measure-first)
 
@@ -646,8 +671,10 @@ interpenetration over **all** pairs, as % of contact:
 | `(k_QtQt, k_FtFt, k_QtFt)` | `alpha_max` | Qt–Qt | Qt–Ft | Ft–Ft | bound Ft | avg cluster |
 |---|---|---|---|---|---|---|
 | (0.5, 2, 1.5) — previous | 0.40 | 0.0096 ± 0.0009 | 0.0101 ± 0.0005 | 0.0011 ± 0.0002 | 0.934 ± 0.005 | 9.3 ± 1.0 |
-| **(4, 3, 1.5)** | 0.60 | **0.0012 ± 0.0001** | 0.0094 ± 0.0001 | 0.0009 ± 0.0002 | 0.948 ± 0.008 | 8.2 ± 0.6 |
+| **(4, 3, 1.5)** — adopted | 0.60 | **0.0012 ± 0.0001** | 0.0094 ± 0.0001 | 0.0009 ± 0.0002 | 0.948 ± 0.008 | 8.2 ± 0.6 |
 | (8, 4, 1.5) | 0.80 | 0.0006 ± 0.0001 | 0.0092 ± 0.0001 | 0.0005 ± 0.0002 | 0.944 ± 0.006 | 8.0 ± 0.7 |
+
+`Run_Simulation.ipynb` now ships the adopted row, `soft.k_* = (4, 3, 1.5)`.
 
 `k_QtQt` is the free win — it was ~10× below its ceiling, and raising it to 4 cuts Qt–Qt
 interpenetration ~8× (fraction of Qt–Qt pairs overlapping: 0.26 % → 0.08 %) with no effect
