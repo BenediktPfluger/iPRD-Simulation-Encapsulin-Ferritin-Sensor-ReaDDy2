@@ -1503,6 +1503,27 @@ echo "Analysis completed at $(date)"
                 self.structural_statistics['final_coord_qt_values'] = np.array(final_qt)
             if final_ft:
                 self.structural_statistics['final_coord_ft_values'] = np.array(final_ft)
+
+            # Per-particle coordination of the final frame, pooled over replicas (same
+            # flattening as composition_vs_size_* below). The mean-per-replica values above
+            # collapse this to one number each, which cannot be re-expanded into the
+            # distribution over particles.
+            all_coord_qt = []
+            all_coord_ft = []
+            n_contrib = 0
+            for d in valid_contacts:
+                if d['coord_dist_qt'] or d['coord_dist_ft']:
+                    if d['coord_dist_qt']:
+                        all_coord_qt.extend(np.asarray(d['coord_dist_qt'][-1]).ravel())
+                    if d['coord_dist_ft']:
+                        all_coord_ft.extend(np.asarray(d['coord_dist_ft'][-1]).ravel())
+                    n_contrib += 1
+            if all_coord_qt or all_coord_ft:
+                self.structural_statistics['final_coord_dist_qt'] = np.array(all_coord_qt, dtype=int)
+                self.structural_statistics['final_coord_dist_ft'] = np.array(all_coord_ft, dtype=int)
+                # Needed to rescale the pooled histogram to a per-replica count; not
+                # recoverable from the pooled arrays alone.
+                self.structural_statistics['final_coord_dist_n_replicas'] = np.array([n_contrib])
         
         valid_comp = [d for d in composition_data if d is not None]
         if valid_comp:

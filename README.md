@@ -420,6 +420,15 @@ composite `plotting.plot_ensemble_panel(stats, structural, config, save_path_bas
 plotters share the argument order `(stats, structural, config)` — the same order returned by
 `analysis.load_ensemble_data` and `EnsembleSimulation.to_plotting_format`.
 
+> The panel's last-row **Coordination Distribution (Final)** histogram (per-particle QtC/FtC
+> coordination, pooled over replicas and scaled to a mean count per replica) reads the
+> `final_coord_dist_qt` / `final_coord_dist_ft` / `final_coord_dist_n_replicas` keys of
+> `ensemble_structural.npz`. These were added later, so ensembles analysed before then render
+> that cell as "No data" — re-run `scripts/analyze_ensemble.py --ensemble-dir <dir>` to
+> populate them (no re-simulation needed). Not to be confused with
+> `plot_ensemble_structural`'s *Final Mean Coordination per Replica*, which histograms one
+> mean value per replica.
+
 **Cross-ensemble comparison:** build a comparison with
 `ae.compare_ensembles({label: dir, ...})` (from `qtft.comparison`, imported as `ae`), then:
 `plot_comparison_summary`, `plot_comparison_final_state`, `plot_comparison_structural`,

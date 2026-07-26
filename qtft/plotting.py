@@ -85,6 +85,55 @@ FONTSIZE_LEGEND = 10
 FONTSIZE_TICK = 10
 
 
+def _plot_coord_distribution(
+    ax,
+    coord_qt,
+    coord_ft,
+    *,
+    weight: Optional[float] = None,
+    ylabel: str = "Count",
+    title: str = "Coordination Distribution (Final)",
+):
+    """Histogram of per-particle coordination number for QtC and FtC on one axes.
+
+    Shared by the single-run structural figure and the ensemble panel. Both species use
+    the same integer bin edges (centred on whole numbers) so their bars line up.
+
+    Parameters
+    ----------
+    ax : matplotlib axes
+    coord_qt, coord_ft : array-like
+        Per-particle coordination numbers of the clustered species (QtC / FtC). Free
+        particles are not included by ``analysis.get_contact_analysis``.
+    weight : float, optional
+        Per-sample weight. ``None`` (default) gives raw counts; pass ``1/n_replicas`` to
+        turn counts pooled over replicas into a mean count per replica.
+    ylabel, title : str
+        Axis label and title (the ensemble panel relabels the y axis).
+    """
+    coord_qt = np.asarray(coord_qt)
+    coord_ft = np.asarray(coord_ft)
+
+    if len(coord_qt) > 0 or len(coord_ft) > 0:
+        max_coord = max(
+            coord_qt.max() if len(coord_qt) > 0 else 0,
+            coord_ft.max() if len(coord_ft) > 0 else 0
+        )
+        bins = np.arange(-0.5, max_coord + 1.5, 1)
+
+        for values, color, label in ((coord_qt, 'blue', 'QtC'), (coord_ft, 'red', 'FtC')):
+            if len(values) == 0:
+                continue
+            w = np.full(len(values), weight) if weight is not None else None
+            ax.hist(values, bins=bins, alpha=0.6, color=color, weights=w,
+                    label=f'{label} (mean={np.mean(values):.2f})', edgecolor='black')
+        ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
+    ax.set_xlabel("Coordination Number", fontsize=FONTSIZE_LABEL)
+    ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
+    ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+
+
 def plot_composition_analysis(
     composition: Dict[str, Any],
     config: SimulationConfig,
@@ -538,25 +587,7 @@ def plot_structural_analysis(
     # Plot 4.2: Coordination distribution (final frame)
     final_coord_qt = contacts["coord_dist_qt"][-1] if contacts["coord_dist_qt"] else np.array([])
     final_coord_ft = contacts["coord_dist_ft"][-1] if contacts["coord_dist_ft"] else np.array([])
-    
-    if len(final_coord_qt) > 0 or len(final_coord_ft) > 0:
-        max_coord = max(
-            final_coord_qt.max() if len(final_coord_qt) > 0 else 0,
-            final_coord_ft.max() if len(final_coord_ft) > 0 else 0
-        )
-        bins = np.arange(-0.5, max_coord + 1.5, 1)
-        
-        if len(final_coord_qt) > 0:
-            ax_coord_dist.hist(final_coord_qt, bins=bins, alpha=0.6, color='blue', 
-                              label=f'QtC (mean={np.mean(final_coord_qt):.2f})', edgecolor='black')
-        if len(final_coord_ft) > 0:
-            ax_coord_dist.hist(final_coord_ft, bins=bins, alpha=0.6, color='red',
-                              label=f'FtC (mean={np.mean(final_coord_ft):.2f})', edgecolor='black')
-        ax_coord_dist.legend(loc='best', fontsize=FONTSIZE_LEGEND)
-    ax_coord_dist.set_xlabel("Coordination Number", fontsize=FONTSIZE_LABEL)
-    ax_coord_dist.set_ylabel("Count", fontsize=FONTSIZE_LABEL)
-    ax_coord_dist.set_title("Coordination Distribution (Final)", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax_coord_dist.grid(True, alpha=0.3)
+    _plot_coord_distribution(ax_coord_dist, final_coord_qt, final_coord_ft)
     
     # Plot 4.3: Bonds vs cluster size
     all_bonds = []
@@ -1808,7 +1839,8 @@ def plot_ensemble_structural(
     ax.set_title("Final Mean Rg Distribution", fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
     
-    # Plot 5: Final coordination distribution
+    # Plot 5: Final mean coordination, one value per replica (NOT the per-particle
+    # coordination distribution — that is the ensemble panel's row-4 histogram).
     ax = axes[1, 1]
     has_coord_data = False
     if 'final_coord_qt_values' in structural:
@@ -1828,8 +1860,9 @@ def plot_ensemble_structural(
     else:
         _ensemble_show_no_data(ax)
     ax.set_xlabel("Mean Coordination", fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel("Count", fontsize=FONTSIZE_LABEL)
-    ax.set_title("Final Coordination Distribution", fontsize=FONTSIZE_TITLE, fontweight='bold')
+    ax.set_ylabel("Replicas", fontsize=FONTSIZE_LABEL)
+    ax.set_title("Final Mean Coordination per Replica",
+                 fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
     
     # ==========================================================================
@@ -3041,7 +3074,11 @@ def plot_ensemble_panel(
         Row 1: Energy | Pressure | Number of Bonds
         Row 2: Particle Counts | Number of Individual Topologies | Average Cluster Size
         Row 3: Largest Cluster Size | Particles by Size Category | Mean Radius of Gyration
-        Row 4: Coordination Number | Mean Cluster Composition | (empty)
+        Row 4: Mean Cluster Composition | Coordination Number | Coordination Distribution (Final)
+
+    The final-row histogram needs the ``final_coord_dist_*`` keys in
+    ``ensemble_structural.npz``; ensembles analysed before those were added render it as
+    "No data" (re-run ``scripts/analyze_ensemble.py`` on the directory to populate them).
     """
     print("\nGenerating ensemble thesis panel...")
 
@@ -3148,8 +3185,25 @@ def plot_ensemble_panel(
     ax.set_title("Mean Radius of Gyration", fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
 
-    # Row 4: coordination (Qt+Ft fused), mean composition, empty
+    # Row 4: mean composition, coordination (Qt+Ft fused), final coordination distribution
     ax = axes[3, 0]
+    times, mean, std, all_data, time_label = _ensemble_struct_ts(
+        structural, timestep, 'composition_times', 'mean_composition_mean',
+        'mean_composition_std', 'mean_composition_all')
+    if times is not None and mean is not None:
+        if _ensemble_plot_with_band(ax, times, mean, std, 'tab:blue', n_replicas,
+                                    all_data, show_individual, individual_alpha):
+            ax.axhline(0.5, color='gray', linestyle='--', alpha=0.5, label='_nolegend_')
+            ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
+    else:
+        _ensemble_show_no_data(ax)
+    ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
+    ax.set_ylabel("Mean Qt Fraction", fontsize=FONTSIZE_LABEL)
+    ax.set_ylim([0, 1])
+    ax.set_title("Mean Cluster Composition", fontsize=FONTSIZE_TITLE, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+
+    ax = axes[3, 1]
     t_qt, m_qt, s_qt, all_qt, time_label = _ensemble_struct_ts(
         structural, timestep, 'contacts_times', 'mean_coord_qt_mean', 'mean_coord_qt_std',
         'mean_coord_qt_all')
@@ -3174,24 +3228,26 @@ def plot_ensemble_panel(
     ax.set_title("Coordination Number", fontsize=FONTSIZE_TITLE, fontweight='bold')
     ax.grid(True, alpha=0.3)
 
-    ax = axes[3, 1]
-    times, mean, std, all_data, time_label = _ensemble_struct_ts(
-        structural, timestep, 'composition_times', 'mean_composition_mean',
-        'mean_composition_std', 'mean_composition_all')
-    if times is not None and mean is not None:
-        if _ensemble_plot_with_band(ax, times, mean, std, 'tab:blue', n_replicas,
-                                    all_data, show_individual, individual_alpha):
-            ax.axhline(0.5, color='gray', linestyle='--', alpha=0.5, label='_nolegend_')
-            ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
+    # Final-frame per-particle coordination, pooled over replicas and rescaled to a
+    # per-replica count so the y axis is comparable with the single-run figure.
+    ax = axes[3, 2]
+    if structural is not None and 'final_coord_dist_qt' in structural:
+        n_contrib = int(np.atleast_1d(
+            structural.get('final_coord_dist_n_replicas', [1]))[0]) or 1
+        _plot_coord_distribution(
+            ax,
+            structural.get('final_coord_dist_qt', []),
+            structural.get('final_coord_dist_ft', []),
+            weight=1.0 / n_contrib,
+            ylabel="Mean count per replica",
+        )
     else:
+        # Ensembles analysed before final_coord_dist_* was added to ensemble_structural.npz.
         _ensemble_show_no_data(ax)
-    ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel("Mean Qt Fraction", fontsize=FONTSIZE_LABEL)
-    ax.set_ylim([0, 1])
-    ax.set_title("Mean Cluster Composition", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
-
-    axes[3, 2].axis('off')
+        ax.set_xlabel("Coordination Number", fontsize=FONTSIZE_LABEL)
+        ax.set_ylabel("Mean count per replica", fontsize=FONTSIZE_LABEL)
+        ax.set_title("Coordination Distribution (Final)",
+                     fontsize=FONTSIZE_TITLE, fontweight='bold')
 
     plt.tight_layout()
 
