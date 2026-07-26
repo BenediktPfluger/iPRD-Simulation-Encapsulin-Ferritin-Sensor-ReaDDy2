@@ -30,7 +30,6 @@ Usage:
 from __future__ import annotations
 import logging
 
-import itertools
 import json
 import os
 import warnings
@@ -1507,20 +1506,24 @@ def print_analysis_summary(h5_file: str, config: Optional[SimulationConfig] = No
     print("=" * 60 + "\n")
 
 
-def get_min_pair_distances(
+def get_overlap_statistics(
     h5_file: str,
     config: SimulationConfig,
-    frame: int = -1,
+    n_frames: int = 5,
     trajectory: Optional[readdy.Trajectory] = None,
 ) -> Dict[str, Any]:
     """
-    Minimum center-to-center distance per species pair in a single frame (default: last).
+    Distribution of pair interpenetration, pooled over the last ``n_frames`` frames.
 
-    A quick overlap diagnostic: for each of Qt-Qt, Qt-Ft, Ft-Ft it reports the closest
-    center-to-center distance found (minimum-image convention for the periodic box) and the
-    contact distance (sum of radii). ``min << contact`` means particles are interpenetrating;
-    with the soft/weak potentials a small sub-contact overlap (~sqrt(2*kB*T/k)) is expected.
-    Free and clustered particles are grouped together (Qt = {Qt, QtC}, Ft = {Ft, FtC}).
+    A single-frame *minimum* is an extreme-value statistic dominated by the one
+    closest pair, too noisy to rank parameter sets against each other. This pools
+    every pair distance over several frames and reports how *widespread* and how
+    *deep* the interpenetration is, which is the quantity to minimize when tuning
+    the soft-mode force constants ``config.soft.k_*``.
+
+    For each pair family (Qt-Qt, Qt-Ft, Ft-Ft; free and clustered grouped together)
+    the overlap of a pair at centre-to-centre distance d is ``max(contact - d, 0)``,
+    with ``contact = r_i + r_j``. Distances use the minimum-image convention.
 
     Parameters
     ----------
@@ -1528,87 +1531,181 @@ def get_min_pair_distances(
         Path to trajectory HDF5 file.
     config : SimulationConfig
         Configuration (particle radii/names and box size).
-    frame : int
-        Frame index to analyze (default -1 = last recorded frame).
+    n_frames : int
+        Number of trailing recorded frames to pool (default: 5). Values <= 0, or
+        more frames than exist, use the whole trajectory.
     trajectory : readdy.Trajectory, optional
         Unused placeholder for API symmetry with other analysis functions.
 
     Returns
     -------
     dict with keys:
-        step : int               -- simulation step of the analyzed frame
-        time_us : float          -- that step converted to microseconds
-        pairs : dict             -- {"Qt-Qt"/"Qt-Ft"/"Ft-Ft": {"min","contact",
-                                     "overlap_nm","overlap_frac","n_pairs"}}
+        n_frames_used : int      -- how many frames were pooled
+        steps : list of int      -- simulation steps of those frames
+        time_us : float          -- last pooled step in microseconds
+        pairs : dict             -- {"Qt-Qt"/"Qt-Ft"/"Ft-Ft": {...}} with per family:
+            contact : float           -- r_i + r_j (nm)
+            min : float               -- closest distance seen (nm)
+            n_pairs : int             -- pairs sampled (summed over frames)
+            n_overlapping : int       -- pairs with d < contact
+            frac_overlapping : float  -- n_overlapping / n_pairs
+            mean_overlap_nm : float   -- mean depth over OVERLAPPING pairs (nm)
+            mean_overlap_frac : float -- same, as a fraction of contact
+            mean_overlap_all_frac : float -- mean depth over ALL pairs (non-overlapping
+                                     count as 0), as a fraction of contact
+            p95_overlap_frac : float  -- 95th percentile depth over overlapping pairs
+            max_overlap_frac : float  -- deepest interpenetration seen
+
+    Notes
+    -----
+    Prefer ``mean_overlap_all_frac`` when ranking parameter sets. The conditional
+    ``mean_overlap_frac`` is biased by a selection effect: stiffening a pair removes
+    the shallow overlaps first, so the mean *among those still overlapping* can stay
+    flat (or rise) while total interpenetration falls. The unconditional mean
+    (= mean_overlap_frac x frac_overlapping) has no such bias.
     """
     data = _extract_frame_data(h5_file, config, verbose=False)
     if data["n_frames"] == 0:
         raise ValueError(f"No frames found in {h5_file}")
-    pos = np.asarray(data["positions"][frame])
-    types = list(data["types"][frame])
-    box = np.asarray(config.box_size, dtype=float)
 
+    total = data["n_frames"]
+    n_use = total if (n_frames is None or n_frames <= 0) else min(int(n_frames), total)
+    frame_idx = list(range(total - n_use, total))
+
+    box = np.asarray(config.box_size, dtype=float)
     qt_names = {config.qt.name, config.qt.cluster_name}
     ft_names = {config.ft.name, config.ft.cluster_name}
-    qt_idx = [i for i, t in enumerate(types) if t in qt_names]
-    ft_idx = [i for i, t in enumerate(types) if t in ft_names]
-
-    def min_dist(ia, ib, same):
-        pairs = itertools.combinations(ia, 2) if same else itertools.product(ia, ib)
-        best = np.inf
-        n = 0
-        for i, j in pairs:
-            if i == j:
-                continue
-            d = pos[i] - pos[j]
-            d -= box * np.round(d / box)          # minimum-image
-            r = float(np.linalg.norm(d))
-            if r < best:
-                best = r
-            n += 1
-        return (best if n else float("nan")), n
-
     rq, rf = config.qt.radius, config.ft.radius
-    specs = [
-        ("Qt-Qt", qt_idx, qt_idx, True, 2.0 * rq),
-        ("Qt-Ft", qt_idx, ft_idx, False, rq + rf),
-        ("Ft-Ft", ft_idx, ft_idx, True, 2.0 * rf),
-    ]
-    pairs = {}
-    for label, ia, ib, same, contact in specs:
-        mn, n = min_dist(ia, ib, same)
-        overlap = max(contact - mn, 0.0) if mn == mn else float("nan")   # nan-safe
+    contacts = {"Qt-Qt": 2.0 * rq, "Qt-Ft": rq + rf, "Ft-Ft": 2.0 * rf}
+
+    # Pool raw distances per family across the selected frames.
+    pooled: Dict[str, List[np.ndarray]] = {k: [] for k in contacts}
+    steps: List[int] = []
+
+    for fi in frame_idx:
+        pos = np.asarray(data["positions"][fi], dtype=float)
+        types = np.asarray(data["types"][fi])
+        if pos.size == 0:
+            continue
+        qt_mask = np.isin(types, list(qt_names))
+        ft_mask = np.isin(types, list(ft_names))
+
+        # Full minimum-image distance matrix for the frame (N is a few hundred).
+        delta = pos[:, None, :] - pos[None, :, :]
+        delta -= box * np.round(delta / box)
+        dist = np.linalg.norm(delta, axis=-1)
+
+        for label, ma, mb, same in (
+            ("Qt-Qt", qt_mask, qt_mask, True),
+            ("Qt-Ft", qt_mask, ft_mask, False),
+            ("Ft-Ft", ft_mask, ft_mask, True),
+        ):
+            ia = np.flatnonzero(ma)
+            ib = np.flatnonzero(mb)
+            if ia.size == 0 or ib.size == 0:
+                continue
+            block = dist[np.ix_(ia, ib)]
+            if same:
+                if ia.size < 2:
+                    continue
+                iu = np.triu_indices(ia.size, k=1)   # unique pairs, no self-pairs
+                pooled[label].append(block[iu])
+            else:
+                pooled[label].append(block.ravel())
+
+        steps.append(int(data["times"][fi]) if len(data["times"]) else 0)
+
+    pairs: Dict[str, Any] = {}
+    for label, contact in contacts.items():
+        chunks = pooled[label]
+        if not chunks:
+            pairs[label] = {
+                "contact": contact, "min": float("nan"), "n_pairs": 0, "n_overlapping": 0,
+                "frac_overlapping": float("nan"), "mean_overlap_nm": float("nan"),
+                "mean_overlap_frac": float("nan"), "p95_overlap_frac": float("nan"),
+                "max_overlap_frac": float("nan"),
+            }
+            continue
+        d = np.concatenate(chunks)
+        ov = np.clip(contact - d, 0.0, None)
+        hit = ov > 0.0
+        n_hit = int(hit.sum())
+        if n_hit:
+            ov_hit = ov[hit]
+            mean_nm = float(ov_hit.mean())
+            p95 = float(np.percentile(ov_hit, 95))
+            mx = float(ov_hit.max())
+        else:
+            mean_nm = p95 = mx = 0.0
+        mean_all_nm = float(ov.mean())        # zeros included -> unbiased by selection
         pairs[label] = {
-            "min": mn,
             "contact": contact,
-            "overlap_nm": overlap,
-            "overlap_frac": (overlap / contact) if (contact > 0 and overlap == overlap) else float("nan"),
-            "n_pairs": n,
+            "min": float(d.min()),
+            "n_pairs": int(d.size),
+            "n_overlapping": n_hit,
+            "frac_overlapping": n_hit / d.size,
+            "mean_overlap_nm": mean_nm,
+            "mean_overlap_frac": mean_nm / contact if contact > 0 else float("nan"),
+            "mean_overlap_all_frac": mean_all_nm / contact if contact > 0 else float("nan"),
+            "p95_overlap_frac": p95 / contact if contact > 0 else float("nan"),
+            "max_overlap_frac": mx / contact if contact > 0 else float("nan"),
         }
 
-    step = int(data["times"][frame]) if len(data["times"]) else 0
-    return {"step": step, "time_us": float(_steps_to_us(step, config.timestep)), "pairs": pairs}
+    last_step = steps[-1] if steps else 0
+    return {
+        "n_frames_used": len(steps),
+        "steps": steps,
+        "time_us": float(_steps_to_us(last_step, config.timestep)),
+        "pairs": pairs,
+    }
 
 
-def print_min_distance_table(
+def print_overlap_summary(
     h5_file: str,
     config: SimulationConfig,
-    frame: int = -1,
+    n_frames: int = 5,
     trajectory: Optional[readdy.Trajectory] = None,
 ) -> Dict[str, Any]:
-    """Print the minimum center-to-center distance / overlap table (see get_min_pair_distances)."""
-    res = get_min_pair_distances(h5_file, config, frame=frame, trajectory=trajectory)
+    """
+    Print the interpenetration table: closest approach, deepest overlap, and mean overlap.
+
+    Combines the worst-case view (closest pair / deepest interpenetration) with the
+    aggregate one (mean over every pair), from a single pass over the trajectory. See
+    ``get_overlap_statistics``, whose result dict is returned unchanged — it also carries
+    the fraction of overlapping pairs and the conditional/p95 depths, which are not printed.
+
+    Parameters
+    ----------
+    h5_file : str
+        Path to trajectory HDF5 file.
+    config : SimulationConfig
+        Configuration (particle radii/names and box size).
+    n_frames : int
+        Trailing frames pooled for the statistics (default: 5). Use 1 for the final
+        frame only.
+    trajectory : readdy.Trajectory, optional
+        Unused placeholder for API symmetry with other analysis functions.
+    """
+    res = get_overlap_statistics(h5_file, config, n_frames=n_frames, trajectory=trajectory)
+    n_used = res["n_frames_used"]
     print("=" * 60)
-    print(f"MINIMUM CENTER-TO-CENTER DISTANCES (frame at t={format_duration(res['time_us'] * 1e3)})")
+    print(f"MINIMUM & MEAN INTERPENETRATION "
+          f"({n_used} frame{'s' if n_used != 1 else ''}, "
+          f"t={format_duration(res['time_us'] * 1e3)})")
     print("=" * 60)
-    print(f"  {'Pair':<7}{'min(nm)':>9}{'contact':>9}{'overlap (nm / %)':>20}")
+    print(f"  {'Pair':<7}{'min(nm)':>9}{'contact':>9}{'deepest (nm / %)':>20}{'mean ov%':>12}")
     for label, p in res["pairs"].items():
         if p["min"] != p["min"]:   # nan -> too few particles
-            print(f"  {label:<7}{'n/a':>9}{p['contact']:>9.1f}{'(too few particles)':>20}")
+            print(f"  {label:<7}{'n/a':>9}{p['contact']:>9.1f}"
+                  f"{'(too few particles)':>20}{'n/a':>12}")
             continue
-        ov = f"{p['overlap_nm']:.1f} ({100 * p['overlap_frac']:.0f}%)"
-        print(f"  {label:<7}{p['min']:>9.1f}{p['contact']:>9.1f}{ov:>20}")
-    print("  (min < contact => interpenetration; soft/weak potentials allow small sub-contact overlap)")
+        deepest = f"{p['max_overlap_frac'] * p['contact']:.1f} ({100 * p['max_overlap_frac']:.0f}%)"
+        print(f"  {label:<7}{p['min']:>9.1f}{p['contact']:>9.1f}{deepest:>20}"
+              f"{100 * p['mean_overlap_all_frac']:>12.3f}")
+    print("  mean ov% = mean interpenetration over ALL pairs (% of contact), "
+          "0 for non-overlapping")
+    print("  (min < contact => interpenetration; soft/weak potentials allow small "
+          "sub-contact overlap)")
     print("=" * 60 + "\n")
     return res
 

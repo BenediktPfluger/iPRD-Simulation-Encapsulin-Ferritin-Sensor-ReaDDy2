@@ -144,6 +144,7 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `scripts/analyze_ensemble.py` | CLI to (re)analyze an ensemble directory in parallel; `compare` subcommand. |
 | `scripts/run_replica.py` | CLI to run **one** replica from a config JSON (used locally and by SLURM job arrays). |
 | `scripts/calibrate_timestep.py` | CLI "measure-first" sweep over `(timestep, diffusion)` in **soft** mode: reports stability (finite + bond-length drift), the diffusion criterion, reaction-probability saturation, the largest stable `dt`, and reachable simulated time. See **[§12](#12-soft-mode--reaching-larger-timesteps)**. |
+| `scripts/calibrate_soft_k.py` | CLI sweep over the **soft**-mode force constants `soft.k_*`: measures interpenetration (via `analysis.get_overlap_statistics`) against numerical stability, reported with the per-step overshoot ratio `alpha = k·D·dt/(kB·T)`. See **[§12](#12-soft-mode--reaching-larger-timesteps)**. |
 | `Run_Simulation.ipynb` | Run-only notebook: one **Configuration** cell (all parameters) + one **Run** cell that dispatches on `RUN_MODE` (`single`/`ensemble`) and `ENABLE_DEAGG` (plain vs agglomeration↔deagglomeration cycling); optional SLURM cell. No plotting. |
 | `Plot_Simulation_Results.ipynb` | Plotting/reporting notebook: one **Settings** cell + one **Run** cell selected by `MODE` (`single` trajectory / `ensemble` directory / `comparison` of several). Each mode auto-generates the plots **and** the text summary **and** the data/table exports (CSV/LaTeX) into a `Plots/` folder. |
 
@@ -374,6 +375,13 @@ This (re)writes `ensemble_statistics.json` and `ensemble_structural.npz`.
 - **Contacts:** coordination numbers per particle type, bonds per cluster.
 - **Composition:** Qt-fraction per cluster and vs cluster size.
 - **RDF:** Qt/QtC–Ft/FtC radial distribution (registered as a ReaDDy observable).
+- **Overlap / interpenetration:** `get_overlap_statistics` pools every pair distance over
+  the trailing frames and reports, per species pair, the closest approach, the fraction of
+  pairs overlapping, and the mean/p95/max depth as a fraction of contact.
+  `print_overlap_summary` prints the closest-approach, deepest-overlap and mean-overlap
+  table (the notebooks call this after every run). When comparing parameter sets, rank on
+  the mean over *all* pairs (`mean_overlap_all_frac`) — a minimum is an extreme-value
+  statistic, and the mean over only the overlapping pairs is selection-biased.
 
 **Output-file inventory:**
 
@@ -593,6 +601,56 @@ column). Review the
 largest-stable-`dt` / reachable-time table **before** committing to a production timescale, then
 decide whether the physics-faithful `dt` is enough or further coarse-graining (softer bond, lower
 `D`, rescaled `kon`/`koff`) is warranted.
+
+### Choosing the force constants `soft.k_*` (least overlap)
+
+Interpenetration falls monotonically with `k`, so there is no interior optimum — the
+question is the largest `k` that is still stable at the production `dt`. The bound is the
+per-step **overshoot ratio**
+
+```
+alpha = k · D · dt / (kB·T)          kB·T = 2.494 kJ/mol at 300 K
+```
+
+A particle pushed out of an overlap `δ` moves `alpha·δ` in one Euler step, so `alpha ≥ 1`
+means it overshoots and the pair oscillates. A cross pair is governed by the *faster*
+species. Sweep it with `scripts/calibrate_soft_k.py`, which reports `alpha` alongside the
+measured overlap, stability, and — importantly — the bound fraction and cluster sizes.
+
+Three things that are easy to get wrong:
+
+- **Rank on the unconditional overlap** (`mean_overlap_all_frac`), not on the mean over
+  overlapping pairs. Stiffening a pair removes the *shallow* overlaps first, so the
+  conditional mean stays flat while total interpenetration falls several-fold.
+- **The pairs are not equivalent — `Qt–Ft` is the reactive pair.** Since
+  `binding_radius ≈ r_Qt + r_Ft`, the Qt–Ft repulsion acts over exactly the range where
+  binding must happen, so stiffening `k_QtFt` shortens the contact residence time and
+  suppresses aggregation. `k_QtQt` / `k_FtFt` are non-reactive and have no such cost.
+- **`alpha < 1` was necessary but not the binding constraint** in the runs tested: no
+  numerical blow-up appeared even at `alpha ≈ 1.6`, because deep overlaps are rare. What
+  degraded first was the *physics* (aggregation), not the integrator.
+
+Measured on the notebook's 200 Qt + 400 Ft soft preset (`dt = 1 µs`, `D_Qt = 2e-4`,
+`D_Ft = 5e-4`, `k_bond = 1`, `allow_loops=True`), 100 000 steps = 100 ms, 3 seeds — mean
+interpenetration over **all** pairs, as % of contact:
+
+| `(k_QtQt, k_FtFt, k_QtFt)` | `alpha_max` | Qt–Qt | Qt–Ft | Ft–Ft | bound Ft | avg cluster |
+|---|---|---|---|---|---|---|
+| (0.5, 2, 1.5) — previous | 0.40 | 0.0096 ± 0.0009 | 0.0101 ± 0.0005 | 0.0011 ± 0.0002 | 0.934 ± 0.005 | 9.3 ± 1.0 |
+| **(4, 3, 1.5)** | 0.60 | **0.0012 ± 0.0001** | 0.0094 ± 0.0001 | 0.0009 ± 0.0002 | 0.948 ± 0.008 | 8.2 ± 0.6 |
+| (8, 4, 1.5) | 0.80 | 0.0006 ± 0.0001 | 0.0092 ± 0.0001 | 0.0005 ± 0.0002 | 0.944 ± 0.006 | 8.0 ± 0.7 |
+
+`k_QtQt` is the free win — it was ~10× below its ceiling, and raising it to 4 cuts Qt–Qt
+interpenetration ~8× (fraction of Qt–Qt pairs overlapping: 0.26 % → 0.08 %) with no effect
+on binding. `k_FtFt` matters little (Ft–Ft overlap is already rare). `k_QtFt` is the only
+lever on the *dominant* Qt–Ft term, but raising it 1.5 → 6 drops bound Ft from 0.95 to 0.69
+and mean cluster size from 10.5 to 2.3 — so leave it at 1.5. To reduce Qt–Ft
+interpenetration without that cost, widen `binding_radius` beyond contact (giving a
+reactive shell outside the repulsive core) or stiffen `k_bond`, rather than `k_QtFt`.
+
+> Note: with `kernel="CPU"` and `n_threads > 1`, runs are **not** reproducible from
+> `rng_seed` — repeating an identical config gives slightly different trajectories. Compare
+> parameter sets across several seeds, not from single runs.
 
 ### Validating (calibrate-then-predict)
 
