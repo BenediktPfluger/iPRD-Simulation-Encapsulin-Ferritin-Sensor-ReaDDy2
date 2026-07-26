@@ -84,6 +84,11 @@ FONTSIZE_LABEL = 12
 FONTSIZE_LEGEND = 10
 FONTSIZE_TICK = 10
 
+# Species colours for the COORDINATION plots (Qt/QtC vs Ft/FtC). Scoped to those plots
+# only — particle counts, composition and Rg keep their own blue/red scheme.
+COORD_COLOR_QT = 'tab:green'
+COORD_COLOR_FT = 'tab:red'
+
 
 def _plot_coord_distribution(
     ax,
@@ -121,7 +126,8 @@ def _plot_coord_distribution(
         )
         bins = np.arange(-0.5, max_coord + 1.5, 1)
 
-        for values, color, label in ((coord_qt, 'blue', 'QtC'), (coord_ft, 'red', 'FtC')):
+        for values, color, label in ((coord_qt, COORD_COLOR_QT, 'QtC'),
+                                     (coord_ft, COORD_COLOR_FT, 'FtC')):
             if len(values) == 0:
                 continue
             w = np.full(len(values), weight) if weight is not None else None
@@ -568,16 +574,18 @@ def plot_structural_analysis(
     
     # Plot 4.1: Coordination over time
     times_ct_us = _steps_to_us(contacts["times"], config.timestep) * time_factor
-    ax_coord_time.plot(times_ct_us, contacts["mean_coord_qt"], 'b-', linewidth=2, label='QtC')
+    ax_coord_time.plot(times_ct_us, contacts["mean_coord_qt"], linestyle='-',
+                       color=COORD_COLOR_QT, linewidth=2, label='QtC')
     ax_coord_time.fill_between(times_ct_us,
                                contacts["mean_coord_qt"] - contacts["std_coord_qt"],
                                contacts["mean_coord_qt"] + contacts["std_coord_qt"],
-                               alpha=0.2, color='blue')
-    ax_coord_time.plot(times_ct_us, contacts["mean_coord_ft"], 'r-', linewidth=2, label='FtC')
+                               alpha=0.2, color=COORD_COLOR_QT)
+    ax_coord_time.plot(times_ct_us, contacts["mean_coord_ft"], linestyle='-',
+                       color=COORD_COLOR_FT, linewidth=2, label='FtC')
     ax_coord_time.fill_between(times_ct_us,
                                contacts["mean_coord_ft"] - contacts["std_coord_ft"],
                                contacts["mean_coord_ft"] + contacts["std_coord_ft"],
-                               alpha=0.2, color='red')
+                               alpha=0.2, color=COORD_COLOR_FT)
     ax_coord_time.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax_coord_time.set_ylabel("Coordination Number", fontsize=FONTSIZE_LABEL)
     ax_coord_time.set_title("Mean Coordination Over Time", fontsize=FONTSIZE_TITLE, fontweight='bold')
@@ -1786,11 +1794,11 @@ def plot_ensemble_structural(
     coord_plotted = False
     if t_qt is not None and m_qt is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_qt, m_qt, s_qt, 'tab:blue', n_replicas,
+            ax, t_qt, m_qt, s_qt, COORD_COLOR_QT, n_replicas,
             all_qt, show_individual, individual_alpha, label='Qt')
     if t_ft is not None and m_ft is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_ft, m_ft, s_ft, 'tab:red', n_replicas,
+            ax, t_ft, m_ft, s_ft, COORD_COLOR_FT, n_replicas,
             all_ft, show_individual, individual_alpha, label='Ft')
     if coord_plotted:
         ax.legend(loc='lower right', fontsize=FONTSIZE_LEGEND)
@@ -1846,13 +1854,13 @@ def plot_ensemble_structural(
     if 'final_coord_qt_values' in structural:
         final_coord_qt = structural['final_coord_qt_values']
         if len(final_coord_qt) > 0:
-            ax.hist(final_coord_qt, bins=min(10, len(final_coord_qt)), color='tab:red',
+            ax.hist(final_coord_qt, bins=min(10, len(final_coord_qt)), color=COORD_COLOR_QT,
                    edgecolor='black', alpha=0.5, label='Qt')
             has_coord_data = True
     if 'final_coord_ft_values' in structural:
         final_coord_ft = structural['final_coord_ft_values']
         if len(final_coord_ft) > 0:
-            ax.hist(final_coord_ft, bins=min(10, len(final_coord_ft)), color='tab:green',
+            ax.hist(final_coord_ft, bins=min(10, len(final_coord_ft)), color=COORD_COLOR_FT,
                    edgecolor='black', alpha=0.5, label='Ft')
             has_coord_data = True
     if has_coord_data:
@@ -3213,11 +3221,11 @@ def plot_ensemble_panel(
     coord_plotted = False
     if t_qt is not None and m_qt is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_qt, m_qt, s_qt, 'tab:blue', n_replicas,
+            ax, t_qt, m_qt, s_qt, COORD_COLOR_QT, n_replicas,
             all_qt, show_individual, individual_alpha, label='Qt')
     if t_ft is not None and m_ft is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_ft, m_ft, s_ft, 'tab:red', n_replicas,
+            ax, t_ft, m_ft, s_ft, COORD_COLOR_FT, n_replicas,
             all_ft, show_individual, individual_alpha, label='Ft')
     if coord_plotted:
         ax.legend(loc='lower right', fontsize=FONTSIZE_LEGEND)
