@@ -18,6 +18,12 @@ ensemble_state.json
 ensemble_statistics.json
 ensemble_structural.npz
 
+# FIB-SEM comparison exports (regenerate from a trajectory with
+# Export_for_FIB-SEM_Comparison.ipynb / qtft.fibsem_export)
+FIBSEM_Comparison_Export/
+encapsulin_centroids*.csv
+structural_information_and_metadata*.json
+
 # Generated figures (regenerate from data)
 *.svg
 *.png

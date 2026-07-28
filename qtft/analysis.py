@@ -504,9 +504,21 @@ def _extract_topology_info(
 
 
 
+def _min_image(delta: np.ndarray, box: np.ndarray, periodic: bool = True) -> np.ndarray:
+    """Minimum-image displacement, or the plain displacement for a non-periodic box.
+
+    With reflective walls there are no periodic images, so wrapping would report a pair
+    separated by more than half a box length as far closer than it really is.
+    """
+    if not periodic:
+        return delta
+    return delta - box * np.round(delta / box)
+
+
 def _unwrap_cluster_positions(
     positions: np.ndarray,
     box_size: Tuple[float, float, float],
+    periodic: bool = True,
 ) -> np.ndarray:
     """
     Unwrap cluster positions to handle periodic boundary conditions.
@@ -528,7 +540,11 @@ def _unwrap_cluster_positions(
     """
     if len(positions) <= 1:
         return positions.copy()
-    
+
+    # Reflective walls: a cluster cannot straddle a boundary, so nothing to unwrap.
+    if not periodic:
+        return positions.copy()
+
     box = np.array(box_size)
     unwrapped = np.zeros_like(positions)
     unwrapped[0] = positions[0]
@@ -687,7 +703,8 @@ def get_cluster_morphology(
             cluster_pos = positions[particle_indices]
             
             # Unwrap for PBC
-            cluster_pos_unwrapped = _unwrap_cluster_positions(cluster_pos, box_size)
+            cluster_pos_unwrapped = _unwrap_cluster_positions(
+                cluster_pos, box_size, periodic=config.is_periodic)
             
             # Calculate Rg
             rg = _calculate_radius_of_gyration(cluster_pos_unwrapped)
@@ -1025,13 +1042,15 @@ def get_spatial_distribution(
             
             # Get positions and unwrap
             cluster_pos = positions[particle_indices]
-            cluster_pos_unwrapped = _unwrap_cluster_positions(cluster_pos, box_size)
+            cluster_pos_unwrapped = _unwrap_cluster_positions(
+                cluster_pos, box_size, periodic=config.is_periodic)
             
             # Center of mass
             com = cluster_pos_unwrapped.mean(axis=0)
             
             # Wrap COM back into box
-            com = com - np.array(box_size) * np.floor(com / np.array(box_size) + 0.5)
+            if config.is_periodic:   # no images to fold back into with walls
+                com = com - np.array(box_size) * np.floor(com / np.array(box_size) + 0.5)
             
             centers.append(com)
             sizes.append(n_particles)
@@ -1065,7 +1084,8 @@ def get_spatial_distribution(
                         continue
                     # Minimum image distance
                     delta = c1 - c2
-                    delta = delta - np.array(box_size) * np.round(delta / np.array(box_size))
+                    delta = _min_image(delta, np.array(box_size),
+                                      periodic=config.is_periodic)
                     dist = np.linalg.norm(delta)
                     min_dist = min(min_dist, dist)
                 nn_dists.append(min_dist)
@@ -1592,7 +1612,7 @@ def get_overlap_statistics(
 
         # Full minimum-image distance matrix for the frame (N is a few hundred).
         delta = pos[:, None, :] - pos[None, :, :]
-        delta -= box * np.round(delta / box)
+        delta = _min_image(delta, box, periodic=config.is_periodic)
         dist = np.linalg.norm(delta, axis=-1)
 
         for label, ma, mb, same in (
@@ -2379,6 +2399,241 @@ def load_ensemble_data(results_dir: str) -> Tuple[Dict, Dict, Dict]:
 
     return stats, structural, config
 
+
+def _to_grid(src_times: np.ndarray, values: np.ndarray, grid: np.ndarray) -> np.ndarray:
+    """Put a series on ``grid``; pass through unchanged when the axes already agree."""
+    src_times = np.asarray(src_times, dtype=float)
+    values = np.asarray(values, dtype=float)
+    if len(src_times) == len(grid) and np.allclose(src_times, grid):
+        return values
+    if len(src_times) == 0:
+        return np.full(len(grid), np.nan)
+    return np.interp(grid, src_times, values)
+
+
+def build_single_run_plotting_data(
+    h5_file: str,
+    config: SimulationConfig,
+    stride: int = 10,
+) -> Tuple[Dict, Dict, Dict]:
+    """Build ``(stats, structural, config_dict)`` for ONE trajectory, in ensemble format.
+
+    Produces exactly the schema ``load_ensemble_data`` returns, so every ensemble plotter —
+    in particular ``plotting.plot_ensemble_panel`` — works on a single run unchanged. There
+    is one "replica", so ``n_replicas = 1``, every ``*_std`` is zero and every ``*_all`` has
+    shape ``(1, n)``.
+
+    The series themselves come from the ordinary single-run analysis functions
+    (``get_bond_counts``, ``get_cluster_statistics``, ``get_cluster_morphology``,
+    ``get_contact_analysis``, ``get_cluster_composition``, ``get_size_fractions``) and the
+    ReaDDy observables, using the same keys and the same particle-count column order
+    (Qt, Ft, QtC, FtC) that ``EnsembleSimulation.compute_statistics`` uses — so a single run
+    and that run as an ensemble replica give identical numbers.
+
+    For a phased run pass the stitched ``trajectory_combined.h5``: it is an ordinary
+    trajectory and every ``get_*`` function reads it.
+
+    Parameters
+    ----------
+    h5_file : str
+        Trajectory to analyse.
+    config : SimulationConfig
+        Configuration for this run.
+    stride : int
+        Frame stride for the (expensive) structural analyses.
+
+    Returns
+    -------
+    (stats, structural, config_dict)
+    """
+    trajectory = readdy.Trajectory(h5_file)
+
+    # ---------------- time-series statistics ----------------
+    bonds = get_bond_counts(h5_file, trajectory=trajectory, silent=True)
+    times = np.asarray(bonds["times"], dtype=float)
+    stats: Dict[str, Any] = {"times": times, "n_replicas": 1}
+
+    def put(name, src_times, values):
+        v = _to_grid(src_times, values, times)
+        stats[f"{name}_mean"] = v
+        stats[f"{name}_std"] = np.zeros_like(v)
+        stats[f"{name}_all"] = v[None, :]
+
+    put("bonds", bonds["times"], bonds["n_bonds"])
+
+    for obs_name, reader in (("energy", "read_observable_energy"),
+                             ("pressure", "read_observable_pressure")):
+        try:
+            t_obs, vals = getattr(trajectory, reader)()
+            put(obs_name, t_obs, vals)
+        except (KeyError, ValueError, IndexError, RuntimeError, OSError):
+            logger.info("  build_single_run_plotting_data: no '%s' observable", obs_name)
+
+    try:
+        t_pc, counts = trajectory.read_observable_number_of_particles()
+        counts = np.asarray(counts)
+        # Column order matches ensemble.compute_statistics: Qt, Ft, QtC, FtC.
+        for idx, name in enumerate(["qt", "ft", "qtc", "ftc"]):
+            put(f"{name}_count", t_pc, counts[:, idx])
+        put("total_count", t_pc, counts.sum(axis=1))
+    except (KeyError, ValueError, IndexError, RuntimeError, OSError):
+        logger.info("  build_single_run_plotting_data: no particle-count observable")
+
+    cl = get_cluster_statistics(h5_file, trajectory=trajectory)
+    put("n_clusters", cl["times"], cl["n_clusters"])
+    put("largest_cluster", cl["times"], cl["max_sizes"])
+    put("avg_cluster", cl["times"], cl["avg_sizes"])
+
+    kin = get_binding_kinetics(h5_file, config, trajectory=trajectory)
+    put("fraction_bound", kin["times"],
+        (np.asarray(kin["fraction_bound_qt"]) + np.asarray(kin["fraction_bound_ft"])) / 2)
+
+    # ---------------- structural statistics ----------------
+    structural: Dict[str, Any] = {"n_replicas": np.array([1])}
+
+    def put_struct(name, values):
+        v = np.asarray(values, dtype=float)
+        structural[f"{name}_mean"] = v
+        structural[f"{name}_std"] = np.zeros_like(v)
+        structural[f"{name}_all"] = v[None, :]
+
+    morph = get_cluster_morphology(h5_file, config, stride=stride)
+    structural["morphology_times"] = np.asarray(morph["times"])
+    put_struct("mean_rg", morph["mean_rg"])
+    put_struct("std_rg", morph["std_rg"])
+    put_struct("mean_rg_normalized", morph["mean_rg_normalized"])
+
+    contacts = get_contact_analysis(h5_file, config, stride=stride)
+    structural["contacts_times"] = np.asarray(contacts["times"])
+    put_struct("mean_coord_qt", contacts["mean_coord_qt"])
+    put_struct("mean_coord_ft", contacts["mean_coord_ft"])
+
+    comp = get_cluster_composition(h5_file, config, stride=stride)
+    structural["composition_times"] = np.asarray(comp["times"])
+    put_struct("mean_composition", comp["mean_qt_fraction"])
+
+    spatial = get_spatial_distribution(h5_file, config, stride=stride)
+    structural["spatial_times"] = np.asarray(spatial["times"])
+    put_struct("mean_nn_dist", spatial["mean_nn_dist"])
+    put_struct("std_nn_dist", spatial["std_nn_dist"])
+    put_struct("mean_intra_nn_dist", spatial["mean_intra_nn_dist"])
+    put_struct("std_intra_nn_dist", spatial["std_intra_nn_dist"])
+
+    sf = get_size_fractions(h5_file, config)
+    structural["size_fractions_times"] = np.asarray(sf["times"])
+    structural["size_fractions_category_names"] = np.array(sf["category_names"])
+    structural["size_fractions_boundary_min"] = np.array([b[1] for b in sf["boundaries"]])
+    structural["size_fractions_boundary_max"] = np.array(
+        [b[2] if b[2] is not None else -1 for b in sf["boundaries"]])
+    for cat in sf["category_names"]:
+        vals = np.asarray(sf["category_fractions"][cat], dtype=float)
+        key = _size_category_key(cat)
+        structural[f"size_frac_{key}_mean"] = vals
+        structural[f"size_frac_{key}_std"] = np.zeros_like(vals)
+
+    # Final-frame distributions (histogram panels of the ensemble figures).
+    if contacts["coord_dist_qt"] or contacts["coord_dist_ft"]:
+        structural["final_coord_dist_qt"] = np.asarray(
+            contacts["coord_dist_qt"][-1] if contacts["coord_dist_qt"] else [], dtype=int)
+        structural["final_coord_dist_ft"] = np.asarray(
+            contacts["coord_dist_ft"][-1] if contacts["coord_dist_ft"] else [], dtype=int)
+        structural["final_coord_dist_n_replicas"] = np.array([1])
+    for key, series in (("final_rg_values", morph["mean_rg"]),
+                        ("final_coord_qt_values", contacts["mean_coord_qt"]),
+                        ("final_coord_ft_values", contacts["mean_coord_ft"]),
+                        ("final_composition_values", comp["mean_qt_fraction"])):
+        arr = np.asarray(series, dtype=float)
+        if arr.size:
+            structural[key] = np.array([arr[-1]])
+
+    return stats, structural, config.to_dict()
+
+
+def _assemble_kinetics_data(times, n_bonds, n_clusters, avg_sizes, max_sizes,
+                            kin_times, fb_qt, fb_ft, phases, timestep) -> Dict[str, Any]:
+    """Pack series into the ``load_phased_observables`` schema (see that function).
+
+    ``phases`` may be a list of ``PhaseConfig`` or of plain dicts (an ensemble config loaded
+    from JSON); pass ``None``/empty for a non-phased run, which yields no phase boundaries so
+    ``plotting.plot_phased_kinetics`` renders a plain figure with no markers.
+    """
+    t_us = _steps_to_us(np.asarray(times, dtype=float), timestep)
+    kt_us = _steps_to_us(np.asarray(kin_times, dtype=float), timestep)
+
+    boundaries_us: List[float] = []
+    starts_us: List[float] = []
+    names: List[str] = []
+    if phases:
+        def field(p, key, default=None):
+            return p.get(key, default) if isinstance(p, dict) else getattr(p, key, default)
+        steps = [int(field(p, "n_steps", 0)) for p in phases]
+        names = [str(field(p, "name", f"phase {i}")) for i, p in enumerate(phases)]
+        offsets = np.concatenate([[0], np.cumsum(steps)[:-1]]) if steps else np.array([])
+        starts_us = list(_steps_to_us(offsets, timestep))
+        boundaries_us = list(_steps_to_us(offsets[1:], timestep)) if len(offsets) > 1 else []
+
+    return {
+        "time_us": t_us,
+        "n_bonds": np.asarray(n_bonds, dtype=float),
+        "cluster_time_us": t_us,
+        "n_clusters": np.asarray(n_clusters, dtype=float),
+        "avg_sizes": np.asarray(avg_sizes, dtype=float),
+        "max_sizes": np.asarray(max_sizes, dtype=float),
+        "kin_time_us": kt_us,
+        "fraction_bound_qt": np.asarray(fb_qt, dtype=float),
+        "fraction_bound_ft": np.asarray(fb_ft, dtype=float),
+        "phase_boundaries_us": boundaries_us,
+        "phase_starts_us": starts_us,
+        "phase_names": names,
+        "total_time_us": float(t_us[-1]) if len(t_us) else 0.0,
+    }
+
+
+def build_kinetics_data_single(h5_file: str, config: SimulationConfig) -> Dict[str, Any]:
+    """Kinetics series (bonds / bound fraction / cluster size) for ONE non-phased run.
+
+    Same schema as ``load_phased_observables`` — which already covers the phased case — so
+    ``plotting.plot_phased_kinetics(config, data=...)`` renders either.
+    """
+    trajectory = readdy.Trajectory(h5_file)
+    bonds = get_bond_counts(h5_file, trajectory=trajectory, silent=True)
+    cl = get_cluster_statistics(h5_file, trajectory=trajectory)
+    kin = get_binding_kinetics(h5_file, config, trajectory=trajectory)
+    times = np.asarray(bonds["times"], dtype=float)
+    return _assemble_kinetics_data(
+        times, bonds["n_bonds"],
+        _to_grid(cl["times"], cl["n_clusters"], times),
+        _to_grid(cl["times"], cl["avg_sizes"], times),
+        _to_grid(cl["times"], cl["max_sizes"], times),
+        kin["times"], kin["fraction_bound_qt"], kin["fraction_bound_ft"],
+        None, config.timestep)
+
+
+def build_kinetics_data_ensemble(stats: Dict, config: Dict) -> Dict[str, Any]:
+    """Kinetics series from ENSEMBLE replica means, in the same schema.
+
+    Per-species bound fractions are derived from the particle counts the ensemble already
+    stores (``qtc/(qt+qtc)``, ``ftc/(ft+ftc)``), so no change to ``ensemble_statistics.json``
+    is needed. Phase boundaries come from ``config['phases']``.
+    """
+    times = np.asarray(stats["times"], dtype=float)
+    timestep = config.get("timestep", 1e-4) if isinstance(config, dict) else config.timestep
+
+    def frac(bound_key, free_key):
+        bound = np.asarray(stats.get(bound_key, np.zeros_like(times)), dtype=float)
+        free = np.asarray(stats.get(free_key, np.zeros_like(times)), dtype=float)
+        total = bound + free
+        return np.divide(bound, total, out=np.zeros_like(bound), where=total > 0)
+
+    phases = config.get("phases") if isinstance(config, dict) else config.phases
+    return _assemble_kinetics_data(
+        times, stats.get("bonds_mean", np.zeros_like(times)),
+        stats.get("n_clusters_mean", np.zeros_like(times)),
+        stats.get("avg_cluster_mean", np.zeros_like(times)),
+        stats.get("largest_cluster_mean", np.zeros_like(times)),
+        times, frac("qtc_count_mean", "qt_count_mean"),
+        frac("ftc_count_mean", "ft_count_mean"),
+        phases, timestep)
 
 
 def _fmt_mean_std(mean: float, std: float, decimals: int = 1) -> str:

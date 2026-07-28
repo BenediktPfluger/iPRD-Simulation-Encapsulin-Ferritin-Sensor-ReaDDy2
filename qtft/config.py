@@ -707,8 +707,15 @@ class SimulationConfig:
         Lennard-Jones potential configuration
     box_size : tuple of float
         Simulation box dimensions (Lx, Ly, Lz) in nm
-    periodic_boundary : bool
-        Use periodic boundary conditions
+    boundary : str
+        Boundary handling: ``"periodic"`` (default) wraps the box, ``"reflective"`` turns
+        periodicity off and confines every species with a repulsive box potential spanning
+        the full box, so particle *centres* stay inside and the accessible volume — hence
+        the concentration — is identical to a periodic run.
+    wall_force_constant : float
+        Stiffness of the reflective walls, kJ/(mol*nm^2). Ignored when periodic. Too soft
+        and particles leak; the useful scale follows the same overshoot ratio as the pair
+        potentials, ``alpha = k*D*dt/(kB*T)``.
     temperature : float
         Temperature in Kelvin
     timestep : float
@@ -757,8 +764,9 @@ class SimulationConfig:
 
     # Simulation box
     box_size: Tuple[float, float, float] = (50.0, 50.0, 50.0)
-    periodic_boundary: bool = True
-    
+    boundary: str = "periodic"          # "periodic" | "reflective"
+    wall_force_constant: float = 5.0    # kJ/(mol*nm^2); reflective mode only
+
     # Physical parameters
     temperature: float = 300.0
 
@@ -832,7 +840,16 @@ class SimulationConfig:
         # Check box dimensions
         if any(d <= 0 for d in self.box_size):
             raise ValueError(f"Box dimensions must be positive: {self.box_size}")
-        
+
+        # Check boundary handling
+        if self.boundary not in ("periodic", "reflective"):
+            raise ValueError(
+                f"boundary must be 'periodic' or 'reflective', got: {self.boundary!r}")
+        if self.boundary == "reflective" and self.wall_force_constant <= 0:
+            raise ValueError(
+                "wall_force_constant must be > 0 for reflective boundaries, got: "
+                f"{self.wall_force_constant}")
+
         # Check temperature
         if self.temperature <= 0:
             raise ValueError(f"Temperature must be positive: {self.temperature}")
@@ -899,6 +916,11 @@ class SimulationConfig:
         
         return warnings_list
     
+    @property
+    def is_periodic(self) -> bool:
+        """True when the box wraps; False for reflective walls."""
+        return self.boundary == "periodic"
+
     @property
     def equilibrium_bond_length(self) -> float:
         """Equilibrium bond length for Qt-Ft bonds (nm)."""
@@ -1118,7 +1140,12 @@ class SimulationConfig:
             soft=soft,
             weak=weak,
             box_size=box_size,
-            periodic_boundary=params.get("periodic_boundary", True),
+            # Accept the legacy `periodic_boundary` bool as well as the current `boundary`
+            # string, so configs written before reflective walls existed still load.
+            boundary=params.get(
+                "boundary",
+                "periodic" if params.get("periodic_boundary", True) else "reflective"),
+            wall_force_constant=params.get("wall_force_constant", 5.0),
             temperature=params.get("temperature", 300.0),
             equilibration_potential=params.get("equilibration_potential", "WCA"),
             timestep=params.get("timestep", 1e-4),
@@ -1211,7 +1238,8 @@ class SimulationConfig:
             },
             # Simulation parameters
             "box_size": list(self.box_size),  # Convert tuple to list for JSON
-            "periodic_boundary": self.periodic_boundary,
+            "boundary": self.boundary,
+            "wall_force_constant": self.wall_force_constant,
             "temperature": self.temperature,
             "equilibration_potential": self.equilibration_potential,
             "timestep": self.timestep,
@@ -1298,7 +1326,8 @@ class SimulationConfig:
             "weak_cutoff_factor": self.weak.cutoff_factor,
             # Simulation parameters
             "box_size": self.box_size,
-            "periodic_boundary": self.periodic_boundary,
+            "boundary": self.boundary,
+            "wall_force_constant": self.wall_force_constant,
             "temperature": self.temperature,
             "equilibration_potential": self.equilibration_potential,
             "timestep": self.timestep,
@@ -1599,6 +1628,8 @@ def format_param_string(config: "SimulationConfig") -> str:
     # folder/file names are unchanged.
     mono_str = "_FtMono" if config.topology.ft_monovalent else ""
     loop_str = "_loops" if config.topology.allow_loops else ""
+    # Reflective runs must not collide with a periodic run at identical parameters.
+    wall_str = "" if config.is_periodic else "_reflective"
 
     if config.phases:
         # Phased layout: pair kon->agglomeration and koff->deagglomeration with their
@@ -1617,10 +1648,10 @@ def format_param_string(config: "SimulationConfig") -> str:
         if deagg_steps is not None:
             parts.append(f"deaggsteps{int(deagg_steps)}")
         parts.extend([dt_str, time_str])
-        return f"{prefix}_" + "_".join(parts) + loop_str + mono_str
+        return f"{prefix}_" + "_".join(parts) + wall_str + loop_str + mono_str
 
     # Ordinary single run (unchanged when allow_loops/ft_monovalent are default).
-    return f"{prefix}_{kon_str}_{dt_str}_{time_str}{loop_str}{mono_str}"
+    return f"{prefix}_{kon_str}_{dt_str}_{time_str}{wall_str}{loop_str}{mono_str}"
 
 
 # =============================================================================

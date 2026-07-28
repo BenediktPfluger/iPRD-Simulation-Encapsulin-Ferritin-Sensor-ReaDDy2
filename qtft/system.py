@@ -65,7 +65,7 @@ def create_system(
     # Create system with correct box size from the start
     system = readdy.ReactionDiffusionSystem(box_size=list(config.box_size))
 
-    if not config.periodic_boundary:
+    if not config.is_periodic:
         system.periodic_boundary_conditions = [False, False, False]
 
     # Add species
@@ -90,6 +90,11 @@ def create_system(
 
     # Add potentials (production type unless overridden for equilibration / a phase).
     _add_potentials(system, config, potential_type=potential_override)
+
+    # Confining walls for a reflective box. Registered here — i.e. inside create_system —
+    # so every construction path gets them: equilibration, plain production, and each phase
+    # of an agglomeration<->deagglomeration cycle (and hence ensembles, via run_one).
+    _add_walls(system, config)
 
     # Add topology type, bonds, and the resolved set of reactions.
     _add_topologies(
@@ -122,6 +127,38 @@ def _add_species(system: readdy.ReactionDiffusionSystem, config: SimulationConfi
     
     logger.info(f"✓ Species: {config.qt.name}, {config.ft.name}, "
                 f"{config.qt.cluster_name}, {config.ft.cluster_name}")
+
+
+def _add_walls(system: readdy.ReactionDiffusionSystem, config: SimulationConfig):
+    """Confine every species with a repulsive box potential (reflective boundaries).
+
+    ReaDDy has no specular-reflection boundary: turning periodicity off simply lets particles
+    diffuse away, because nothing holds them in. This registers ReaDDy's ``add_box`` external
+    potential — a harmonic wall that is zero inside the box and pushes back outside it — for
+    all four species, so bound clusters are confined too.
+
+    The wall spans the **full** box, so particle *centres* are confined and the accessible
+    volume equals that of a periodic run of the same ``box_size``; the concentration is
+    therefore directly comparable. A particle's volume may protrude by up to its radius.
+
+    No-op for periodic boundaries.
+    """
+    if config.is_periodic:
+        return
+
+    box = np.asarray(config.box_size, dtype=float)
+    origin = (-box / 2.0).tolist()
+    extent = box.tolist()
+    k = float(config.wall_force_constant)
+
+    species = (config.qt.name, config.ft.name,
+               config.qt.cluster_name, config.ft.cluster_name)
+    for name in species:
+        system.potentials.add_box(
+            particle_type=name, force_constant=k, origin=origin, extent=extent)
+
+    logger.info(f"✓ Reflective walls: box potential k={k} kJ/(mol·nm²) on "
+                f"{len(species)} species (periodicity off)")
 
 
 def _add_potentials(

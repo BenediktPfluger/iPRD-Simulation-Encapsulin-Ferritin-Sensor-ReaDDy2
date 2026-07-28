@@ -1365,11 +1365,20 @@ def _ensemble_plot_with_band(
     else:
         std = np.asarray(std)
 
-    mean_label = label if label is not None else f'Mean (N={n_replicas})'
+    # A single run has no spread: drawing a zero-width "± 1 SD" band around every trace
+    # (and labelling it "Mean (N=1)") reads as a bug, so plot the bare series instead.
+    single_run = n_replicas == 1
+
+    if label is not None:
+        mean_label = label
+    else:
+        mean_label = 'Run' if single_run else f'Mean (N={n_replicas})'
     ax.plot(times, mean, color=color, linewidth=2, label=mean_label)
-    ax.fill_between(times, mean - std, mean + std, color=color, alpha=0.3, label=band_label)
-    
-    if show_individual and all_data is not None:
+    if not single_run:
+        ax.fill_between(times, mean - std, mean + std, color=color, alpha=0.3,
+                        label=band_label)
+
+    if show_individual and all_data is not None and not single_run:
         for data in all_data:
             ax.plot(times, data, color=color, alpha=individual_alpha, linewidth=0.5)
     
@@ -2988,6 +2997,7 @@ def plot_phased_kinetics(
     save_path: Optional[str] = None,
     figsize: Tuple[float, float] = (11, 9),
     data: Optional[Dict[str, Any]] = None,
+    title: Optional[str] = None,
 ):
     """Plot a stitched agglomeration<->deagglomeration cycle on one continuous time axis.
 
@@ -3031,7 +3041,8 @@ def plot_phased_kinetics(
     ax = axes[0]
     ax.plot(t_bonds, data["n_bonds"], color="C0", lw=1.5)
     ax.set_ylabel("Number of bonds")
-    ax.set_title("Agglomeration / deagglomeration cycle")
+    # Default title describes a cycle; a non-phased run passes its own.
+    ax.set_title(title if title is not None else "Agglomeration / deagglomeration cycle")
     ax.grid(True, alpha=0.3)
     _mark_phase_boundaries(ax, bnd, starts, names)
 

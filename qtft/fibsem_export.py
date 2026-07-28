@@ -36,7 +36,7 @@ CLUSTERED_TYPE = "QtC"   # encapsulin bound in a cluster
 FREE_TYPE = "Qt"         # free (unbound) encapsulin
 
 
-def _unwrap(positions: np.ndarray, box_size) -> np.ndarray:
+def _unwrap(positions: np.ndarray, box_size, periodic: bool = True) -> np.ndarray:
     """Unwrap one cluster's positions across periodic boundaries.
 
     Mirrors ``qtft.analysis._unwrap_cluster_positions``: anchor on the first particle, then
@@ -48,6 +48,9 @@ def _unwrap(positions: np.ndarray, box_size) -> np.ndarray:
     box = np.asarray(box_size, dtype=float)
     n = len(positions)
     if n == 0:
+        return positions.copy()
+    if not periodic:
+        # Reflective walls: no periodic images, so a cluster is already contiguous.
         return positions.copy()
     unwrapped = np.zeros_like(positions)
     unwrapped[0] = positions[0]
@@ -66,6 +69,7 @@ def build_encapsulin_table(
     box_size,
     r_qt: float,
     voxel_nm: float = 4.0,
+    periodic: bool = True,
 ) -> Tuple[pd.DataFrame, np.ndarray]:
     """Build the FIB-SEM-schema encapsulin table from a single frame.
 
@@ -110,7 +114,7 @@ def build_encapsulin_table(
         enc_mask = np.isin(types[tp], ENCAPSULIN_TYPES)   # Qt (free) or QtC (bound)
         if not enc_mask.any():
             continue                                       # ferritin-only topology: nothing to export
-        uw = _unwrap(positions[tp], box)                   # unwrap Qt + Ft together
+        uw = _unwrap(positions[tp], box, periodic=periodic)   # unwrap Qt + Ft together
         bound = len(tp) > 1
         for p in uw[enc_mask]:
             coords.append(p)
@@ -301,7 +305,9 @@ def export(
     positions, types, topologies, box, final_step = load_final_frame(
         trajectory_file, config, verbose=verbose)
     r_qt = float(config.qt.radius)
-    df, offset = build_encapsulin_table(positions, types, topologies, box, r_qt, voxel_nm=voxel_nm)
+    df, offset = build_encapsulin_table(positions, types, topologies, box, r_qt,
+                                       voxel_nm=voxel_nm,
+                                       periodic=getattr(config, "is_periodic", True))
 
     csv_path = os.path.join(out_dir, f"encapsulin_centroids{file_tag}.csv")
     json_path = os.path.join(out_dir, f"structural_information_and_metadata{file_tag}.json")

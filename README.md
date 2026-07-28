@@ -125,7 +125,26 @@ ensembles alike. Single dispatch point: `run_one()` calls `run_phased()` automat
 when `config.phases` is set.
 
 **Integrator / environment.** EulerBD Brownian-dynamics integrator, Gillespie reactions,
-cubic periodic box, `T = 300 K`.
+cubic box, `T = 300 K`.
+
+**Boundaries (`config.boundary`, default `"periodic"`).** `"periodic"` wraps the box.
+`"reflective"` switches periodicity off and confines every species with a repulsive box
+potential (ReaDDy's `add_box`, stiffness `config.wall_force_constant`, default 5.0) —
+ReaDDy has no specular-reflection boundary, so a soft wall is the idiom. The wall spans the
+**full** box, so particle *centres* are confined and the accessible volume, hence the
+concentration, is identical to a periodic run; a particle's volume may protrude by up to its
+radius, and thermal penetration of the wall itself is `≈ √(2·kᵦT/k)` ≈ 1 nm at the default
+stiffness (measured max ≈ 2 nm, against a 25 nm Qt radius). Walls are registered inside
+`create_system`, so they apply to equilibration, plain production **and every phase** of an
+agglomeration↔deagglomeration cycle, and therefore to ensembles too. Reflective runs get a
+`_reflective` filename tag (§10).
+
+The analysis honours the setting: the minimum-image convention and the per-cluster
+periodic unwrap are applied only when the box is periodic (`config.is_periodic`). This
+matters — in a 500 nm box, a pair more than 250 nm apart would otherwise be wrapped and
+reported far closer than it is. Two things remain periodic-flavoured and are mildly biased
+near walls: ReaDDy's RDF observable, and the `expected_nn_dist` reference value in
+`get_spatial_distribution`.
 
 ---
 
@@ -261,6 +280,8 @@ The table below leads with the **current values in `Run_Simulation.ipynb`** — 
 | `weak.k_QtQt/…` / `weak.depth_QtQt/…` | per-pair force constant + well depth for `potential_type="weak"` (free-free; cluster/mixed cascade); `k=0` disables a pair | kJ/(mol·nm²), kJ/mol | 0.5 / 3.0 / 2.0 and 0.25 / 0.1 / 8.0 (unused in soft mode) |
 | `weak.cutoff_factor` | weak-mode cutoff as a multiple of contact (`cutoff = factor × (r_i+r_j)`, must be > 1) | – | 1.1 |
 | `box_size` | cubic box edge | nm | (500, 500, 500) |
+| `boundary` | `"periodic"` (wrap) or `"reflective"` (periodicity off + repulsive box walls on all species; adds a `_reflective` filename tag). Read it via `config.is_periodic` | – | `periodic` |
+| `wall_force_constant` | reflective-wall stiffness; ignored when periodic. Too soft leaks (k=1 → 10/600 out), 5.0 confines | kJ/(mol·nm²) | 5.0 |
 | `temperature` | – | K | 300 |
 | `equilibration_potential` | potential during equilibration (`"WCA"`, `"LJ"`, `"soft"`, or `"weak"`); reactions always off | – | `soft` (must be soft/weak at this `dt`) |
 | `timestep` | integration step | ns | 1e3 (1 µs) |
@@ -426,8 +447,33 @@ or `comparison.build_comparison_table(comparison)` across ensembles, then
 Driven from `Plot_Simulation_Results.ipynb` (one `MODE`-selected run cell); all plotting functions,
 including the composite panels, live in `qtft.plotting`.
 
-**Single run:** `plot_observables`, `plot_cluster_analysis`, `plot_structural_cluster_analysis`,
-`plot_cluster_composition` (and `plot_phased_kinetics` for agglomeration↔deagglomeration runs).
+**Both modes report the same metrics**, so a figure can be picked for a talk regardless of how
+the run was analysed. Some quantities therefore appear in more than one figure by design:
+
+| `MODE` | figures written to `Plots/` |
+|---|---|
+| `single` (plain **and** phased) | `run_panel` (the 12-metric panel) + `kinetics` + the four detailed figures below |
+| `ensemble`, plain | `ensemble_panel` |
+| `ensemble`, phased | `ensemble_panel` + `ensemble_kinetics` (from replica means) |
+
+A **single run** gets the ensemble panel via
+`analysis.build_single_run_plotting_data(h5, config, stride)`, which returns the same
+`(stats, structural, config)` triple as `load_ensemble_data` with `n_replicas=1` (every
+`*_std` zero, so no error band is drawn). It composes the ordinary single-run analyses using
+the ensemble's own key names, so a run plotted this way and the same run plotted as an
+ensemble replica give identical numbers. For a phased run, pass `trajectory_combined.h5`.
+
+The **kinetics** figure (bonds / fraction bound / average cluster size) is
+`plot_phased_kinetics`, fed by `analysis.load_phased_observables` (phased single run),
+`analysis.build_kinetics_data_single` (plain single run — no phase markers, pass your own
+`title`), or `analysis.build_kinetics_data_ensemble` (replica means; per-species bound
+fractions are derived from the stored particle counts, so no re-analysis is needed).
+
+**Single run, detailed:** `plot_observables`, `plot_cluster_analysis`,
+`plot_structural_cluster_analysis`, `plot_cluster_composition`. These now run for phased runs
+too, reading the stitched `trajectory_combined.h5`; its `reaction_counts` observable is
+deliberately dropped when the phases are combined, so the cumulative-reactions subplot shows
+"No data available" there.
 
 **Ensemble:** `plot_ensemble_observables`, `plot_ensemble_structural`,
 `plot_ensemble_size_categories` (all support `show_individual=True` to overlay replica traces), or the
@@ -471,6 +517,9 @@ unused there), and the timestep/duration units adapt to the scale — the curren
 preset produces `200Qt_400Ft_soft_kQQ4_kFF3_kQF1.5_kon1e-06_dt1us_750ms_loops`:
 200 Qt + 400 Ft, soft mode with k(QtQt)=4 / k(FtFt)=3 / k(QtFt)=1.5 kJ/(mol·nm²),
 kon=1e-6, 1 µs timestep, 750 ms total, with intra-cluster loops enabled.
+
+When `boundary="reflective"`, a `_reflective` suffix is appended (before `_loops`/`_FtMono`)
+so a walled run cannot overwrite a periodic dataset at otherwise identical parameters.
 
 When `topology.ft_monovalent=True`, a `_FtMono` suffix is appended (e.g.
 `…_dt50ps_100us_FtMono`) so monovalent and multivalent runs at otherwise-identical parameters
