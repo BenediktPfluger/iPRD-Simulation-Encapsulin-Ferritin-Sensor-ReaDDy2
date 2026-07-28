@@ -469,6 +469,18 @@ The **kinetics** figure (bonds / fraction bound / average cluster size) is
 `title`), or `analysis.build_kinetics_data_ensemble` (replica means; per-species bound
 fractions are derived from the stored particle counts, so no re-analysis is needed).
 
+**Clusters above a size threshold** (its own cell + figure, `large_clusters_min{N}.svg/.png`,
+produced for **all four modes**): `plot_large_cluster_count` draws the number of topologies
+holding at least `MIN_CLUSTER_SIZE` particles over time — the quantity the other figures miss,
+since `n_clusters` counts every free monomer as a topology and the size categories report
+*particle fractions* rather than cluster counts. The curve is characteristically
+non-monotonic (it rises as clusters nucleate, then falls as they coalesce into fewer, larger
+ones). Data comes from `analysis.get_large_cluster_counts` /
+`get_large_cluster_counts_ensemble`, which **re-read the replica trajectories** — the
+aggregated `.npz` stores no per-frame size distribution, so this keeps the threshold freely
+adjustable with no change to the saved format. Budget ≈ 2 s per replica (≈ 20 s for a
+10-replica ensemble). Phased runs get the usual phase-boundary markers.
+
 **Single run, detailed:** `plot_observables`, `plot_cluster_analysis`,
 `plot_structural_cluster_analysis`, `plot_cluster_composition`. These now run for phased runs
 too, reading the stitched `trajectory_combined.h5`; its `reaction_counts` observable is

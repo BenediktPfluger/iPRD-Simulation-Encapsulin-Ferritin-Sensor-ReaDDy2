@@ -84,10 +84,11 @@ FONTSIZE_LABEL = 12
 FONTSIZE_LEGEND = 10
 FONTSIZE_TICK = 10
 
-# Species colours for the COORDINATION plots (Qt/QtC vs Ft/FtC). Scoped to those plots
-# only — particle counts, composition and Rg keep their own blue/red scheme.
-COORD_COLOR_QT = 'tab:green'
-COORD_COLOR_FT = 'tab:red'
+# Species colours used wherever Qt/Ft (or QtC/FtC) are drawn as separate series: the
+# coordination plots and the fraction-bound panel of plot_phased_kinetics. Deliberately
+# NOT applied to particle counts, composition or Rg, which keep their own scheme.
+SPECIES_COLOR_QT = 'tab:green'
+SPECIES_COLOR_FT = 'tab:red'
 
 
 def _plot_coord_distribution(
@@ -126,8 +127,8 @@ def _plot_coord_distribution(
         )
         bins = np.arange(-0.5, max_coord + 1.5, 1)
 
-        for values, color, label in ((coord_qt, COORD_COLOR_QT, 'QtC'),
-                                     (coord_ft, COORD_COLOR_FT, 'FtC')):
+        for values, color, label in ((coord_qt, SPECIES_COLOR_QT, 'QtC'),
+                                     (coord_ft, SPECIES_COLOR_FT, 'FtC')):
             if len(values) == 0:
                 continue
             w = np.full(len(values), weight) if weight is not None else None
@@ -575,17 +576,17 @@ def plot_structural_analysis(
     # Plot 4.1: Coordination over time
     times_ct_us = _steps_to_us(contacts["times"], config.timestep) * time_factor
     ax_coord_time.plot(times_ct_us, contacts["mean_coord_qt"], linestyle='-',
-                       color=COORD_COLOR_QT, linewidth=2, label='QtC')
+                       color=SPECIES_COLOR_QT, linewidth=2, label='QtC')
     ax_coord_time.fill_between(times_ct_us,
                                contacts["mean_coord_qt"] - contacts["std_coord_qt"],
                                contacts["mean_coord_qt"] + contacts["std_coord_qt"],
-                               alpha=0.2, color=COORD_COLOR_QT)
+                               alpha=0.2, color=SPECIES_COLOR_QT)
     ax_coord_time.plot(times_ct_us, contacts["mean_coord_ft"], linestyle='-',
-                       color=COORD_COLOR_FT, linewidth=2, label='FtC')
+                       color=SPECIES_COLOR_FT, linewidth=2, label='FtC')
     ax_coord_time.fill_between(times_ct_us,
                                contacts["mean_coord_ft"] - contacts["std_coord_ft"],
                                contacts["mean_coord_ft"] + contacts["std_coord_ft"],
-                               alpha=0.2, color=COORD_COLOR_FT)
+                               alpha=0.2, color=SPECIES_COLOR_FT)
     ax_coord_time.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax_coord_time.set_ylabel("Coordination Number", fontsize=FONTSIZE_LABEL)
     ax_coord_time.set_title("Mean Coordination Over Time", fontsize=FONTSIZE_TITLE, fontweight='bold')
@@ -1803,11 +1804,11 @@ def plot_ensemble_structural(
     coord_plotted = False
     if t_qt is not None and m_qt is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_qt, m_qt, s_qt, COORD_COLOR_QT, n_replicas,
+            ax, t_qt, m_qt, s_qt, SPECIES_COLOR_QT, n_replicas,
             all_qt, show_individual, individual_alpha, label='Qt')
     if t_ft is not None and m_ft is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_ft, m_ft, s_ft, COORD_COLOR_FT, n_replicas,
+            ax, t_ft, m_ft, s_ft, SPECIES_COLOR_FT, n_replicas,
             all_ft, show_individual, individual_alpha, label='Ft')
     if coord_plotted:
         ax.legend(loc='lower right', fontsize=FONTSIZE_LEGEND)
@@ -1863,13 +1864,13 @@ def plot_ensemble_structural(
     if 'final_coord_qt_values' in structural:
         final_coord_qt = structural['final_coord_qt_values']
         if len(final_coord_qt) > 0:
-            ax.hist(final_coord_qt, bins=min(10, len(final_coord_qt)), color=COORD_COLOR_QT,
+            ax.hist(final_coord_qt, bins=min(10, len(final_coord_qt)), color=SPECIES_COLOR_QT,
                    edgecolor='black', alpha=0.5, label='Qt')
             has_coord_data = True
     if 'final_coord_ft_values' in structural:
         final_coord_ft = structural['final_coord_ft_values']
         if len(final_coord_ft) > 0:
-            ax.hist(final_coord_ft, bins=min(10, len(final_coord_ft)), color=COORD_COLOR_FT,
+            ax.hist(final_coord_ft, bins=min(10, len(final_coord_ft)), color=SPECIES_COLOR_FT,
                    edgecolor='black', alpha=0.5, label='Ft')
             has_coord_data = True
     if has_coord_data:
@@ -2991,6 +2992,92 @@ def _mark_phase_boundaries(ax, boundaries_us, starts_us=None, names=None):
                     bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.7))
 
 
+def plot_large_cluster_count(
+    series: List[Dict[str, Any]],
+    min_size: int,
+    timestep: float,
+    *,
+    save_path: Optional[str] = None,
+    save_path_base: Optional[str] = None,
+    phase_boundaries_us: Optional[List[float]] = None,
+    phase_starts_us: Optional[List[float]] = None,
+    phase_names: Optional[List[str]] = None,
+    title: Optional[str] = None,
+    show_individual: bool = False,
+    individual_alpha: float = 0.3,
+    figsize: Tuple[float, float] = (9, 5.5),
+) -> plt.Figure:
+    """Plot the number of clusters at or above a size threshold, over time.
+
+    Works for every mode: one entry in ``series`` for a single run or one ensemble, several
+    for a cross-ensemble comparison.
+
+    Parameters
+    ----------
+    series : list of dict
+        Each entry: ``label`` (str), ``times`` (step numbers), ``mean`` (counts), and
+        optionally ``std``, ``all`` (per-replica traces) and ``n_replicas``. A single run
+        passes ``n_replicas=1``, which suppresses the error band.
+    min_size : int
+        The threshold these counts were computed with (used for the title/label).
+    timestep : float
+        ns per step, for the step -> µs conversion.
+    save_path / save_path_base : str, optional
+        Save one file, or paired ``.svg`` + ``.png``.
+    phase_boundaries_us, phase_starts_us, phase_names : optional
+        Phase markers for an agglomeration<->deagglomeration run, as produced by
+        ``analysis.load_phased_observables``.
+    """
+    fig, ax = plt.subplots(figsize=figsize)
+
+    # One adaptive time unit for the whole figure, shared with the phase markers.
+    max_us = 0.0
+    for s in series:
+        t = _steps_to_us(np.asarray(s["times"], dtype=float), timestep)
+        max_us = max(max_us, float(t.max()) if t.size else 0.0)
+    time_factor, time_unit = choose_time_unit(max_us)
+
+    plotted = False
+    for i, s in enumerate(series):
+        t_us = _steps_to_us(np.asarray(s["times"], dtype=float), timestep) * time_factor
+        color = COMPARISON_COLORS[i % len(COMPARISON_COLORS)] if len(series) > 1 else 'tab:blue'
+        plotted |= _ensemble_plot_with_band(
+            ax, t_us, s["mean"], s.get("std"), color,
+            s.get("n_replicas", 1),
+            all_data=s.get("all"), show_individual=show_individual,
+            individual_alpha=individual_alpha,
+            label=s.get("label"),
+            band_label='± 1 SD' if len(series) == 1 else '_nolegend_',
+        )
+
+    if not plotted:
+        _ensemble_show_no_data(ax)
+    else:
+        ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
+
+    if phase_boundaries_us:
+        bnd = list(np.asarray(phase_boundaries_us) * time_factor)
+        starts = list(np.asarray(phase_starts_us) * time_factor) if phase_starts_us else None
+        _mark_phase_boundaries(ax, bnd, starts, phase_names)
+
+    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
+    ax.set_ylabel("Number of clusters", fontsize=FONTSIZE_LABEL)
+    ax.set_title(title if title is not None else f"Clusters with size ≥ {min_size}",
+                 fontsize=FONTSIZE_TITLE, fontweight='bold')
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"✓ Saved plot to {save_path}")
+    if save_path_base:
+        for ext in ("svg", "png"):
+            p = f"{save_path_base}.{ext}"
+            fig.savefig(p, format=ext, bbox_inches='tight', dpi=300)
+            print(f"✓ Saved plot to {p}")
+    return fig
+
+
 def plot_phased_kinetics(
     config: "SimulationConfig",
     phase_files: Optional[List[str]] = None,
@@ -3048,8 +3135,8 @@ def plot_phased_kinetics(
 
     # 2) Fraction bound
     ax = axes[1]
-    ax.plot(t_kin, data["fraction_bound_qt"], color="C1", lw=1.5, label="Qt")
-    ax.plot(t_kin, data["fraction_bound_ft"], color="C2", lw=1.5, label="Ft")
+    ax.plot(t_kin, data["fraction_bound_qt"], color=SPECIES_COLOR_QT, lw=1.5, label="Qt")
+    ax.plot(t_kin, data["fraction_bound_ft"], color=SPECIES_COLOR_FT, lw=1.5, label="Ft")
     ax.set_ylabel("Fraction bound")
     ax.set_ylim(-0.05, 1.05)
     ax.legend(loc="center left")
@@ -3058,7 +3145,8 @@ def plot_phased_kinetics(
 
     # 3) Average cluster size
     ax = axes[2]
-    ax.plot(t_clus, data["avg_sizes"], color="C3", lw=1.5)
+    # the colour Qt vacated in the fraction-bound panel above
+    ax.plot(t_clus, data["avg_sizes"], color="tab:orange", lw=1.5)
     ax.set_ylabel("Avg cluster size")
     ax.set_xlabel(time_label)
     ax.grid(True, alpha=0.3)
@@ -3232,11 +3320,11 @@ def plot_ensemble_panel(
     coord_plotted = False
     if t_qt is not None and m_qt is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_qt, m_qt, s_qt, COORD_COLOR_QT, n_replicas,
+            ax, t_qt, m_qt, s_qt, SPECIES_COLOR_QT, n_replicas,
             all_qt, show_individual, individual_alpha, label='Qt')
     if t_ft is not None and m_ft is not None:
         coord_plotted |= _ensemble_plot_with_band(
-            ax, t_ft, m_ft, s_ft, COORD_COLOR_FT, n_replicas,
+            ax, t_ft, m_ft, s_ft, SPECIES_COLOR_FT, n_replicas,
             all_ft, show_individual, individual_alpha, label='Ft')
     if coord_plotted:
         ax.legend(loc='lower right', fontsize=FONTSIZE_LEGEND)

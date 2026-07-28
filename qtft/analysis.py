@@ -2549,6 +2549,106 @@ def build_single_run_plotting_data(
     return stats, structural, config.to_dict()
 
 
+def get_large_cluster_counts(
+    h5_file: str,
+    min_size: int,
+    trajectory: Optional[readdy.Trajectory] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Number of clusters holding at least ``min_size`` particles, per recorded frame.
+
+    Complements the other cluster metrics: ``n_clusters`` counts every topology, and since
+    ``engine.place_particles`` gives each free particle its own single-particle topology it is
+    dominated by monomers. Thresholding at ``min_size >= 2`` counts only genuine clusters.
+
+    Reads the topology observable only (via ``get_cluster_statistics``), so it is cheap —
+    about 2 s for a 5000-frame trajectory.
+
+    Parameters
+    ----------
+    h5_file : str
+        Trajectory to analyse.
+    min_size : int
+        Inclusive size threshold in particles (``size >= min_size``).
+    trajectory : readdy.Trajectory, optional
+        Pre-loaded trajectory to reuse.
+
+    Returns
+    -------
+    (times_steps, counts) : ndarray, ndarray
+        Simulation step numbers (NOT ns — convert with ``_steps_to_us``) and the matching
+        cluster counts.
+    """
+    if int(min_size) < 1:
+        raise ValueError(f"min_size must be >= 1, got {min_size}")
+    cl = get_cluster_statistics(h5_file, trajectory=trajectory)
+    counts = np.array([int((np.asarray(sizes) >= int(min_size)).sum())
+                       for sizes in cl["cluster_sizes"]], dtype=int)
+    return np.asarray(cl["times"], dtype=float), counts
+
+
+def _replica_trajectory(replica_dir: str) -> Optional[str]:
+    """Pick a replica's trajectory: combined (phased) > plain > last phase. None if absent."""
+    import glob as _glob
+    combined = os.path.join(replica_dir, "trajectory_combined.h5")
+    plain = os.path.join(replica_dir, "trajectory.h5")
+    if os.path.isfile(combined):
+        return combined
+    if os.path.isfile(plain):
+        return plain
+    phases = sorted(_glob.glob(os.path.join(replica_dir, "phase_*", "trajectory.h5")))
+    return phases[-1] if phases else None
+
+
+def get_large_cluster_counts_ensemble(
+    ensemble_dir: str,
+    min_size: int,
+    config: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Per-replica large-cluster counts for an ensemble, averaged across replicas.
+
+    Re-reads each replica's trajectory, because ``ensemble_structural.npz`` stores no
+    per-frame cluster-size distribution — only ``n_clusters``, the average/largest size, and
+    particle fractions in fixed size categories, none of which yield a count above an
+    arbitrary threshold. Reading them here keeps ``min_size`` freely adjustable and needs no
+    change to the saved format.
+
+    For a phased replica the stitched ``trajectory_combined.h5`` is preferred, so the step
+    axis is already continuous across the cycle.
+
+    Returns
+    -------
+    dict with ``times`` (steps), ``mean``, ``std``, ``all`` (n_replicas x n_frames) and
+    ``n_replicas``.
+    """
+    import glob as _glob
+    replica_dirs = sorted(_glob.glob(os.path.join(ensemble_dir, "replica_*")))
+    pairs = [(d, _replica_trajectory(d)) for d in replica_dirs]
+    found = [(d, f) for d, f in pairs if f]
+    if not found:
+        raise FileNotFoundError(
+            f"No replica trajectories under {ensemble_dir!r} "
+            f"(looked for replica_*/trajectory_combined.h5, replica_*/trajectory.h5, "
+            f"replica_*/phase_*/trajectory.h5). This plot re-reads the trajectories, so an "
+            f"ensemble copied without its .h5 files cannot be plotted.")
+
+    series = []
+    grid = None
+    for _, f in found:
+        times, counts = get_large_cluster_counts(f, min_size)
+        if grid is None:
+            grid = times
+        series.append(_to_grid(times, counts.astype(float), grid))
+
+    matrix = np.vstack(series)
+    return {
+        "times": grid,
+        "mean": matrix.mean(axis=0),
+        "std": matrix.std(axis=0),
+        "all": matrix,
+        "n_replicas": len(found),
+    }
+
+
 def _assemble_kinetics_data(times, n_bonds, n_clusters, avg_sizes, max_sizes,
                             kin_times, fb_qt, fb_ft, phases, timestep) -> Dict[str, Any]:
     """Pack series into the ``load_phased_observables`` schema (see that function).
