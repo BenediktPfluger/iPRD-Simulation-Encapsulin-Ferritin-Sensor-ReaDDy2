@@ -2485,8 +2485,7 @@ def build_single_run_plotting_data(
     put("avg_cluster", cl["times"], cl["avg_sizes"])
 
     kin = get_binding_kinetics(h5_file, config, trajectory=trajectory)
-    put("fraction_bound", kin["times"],
-        (np.asarray(kin["fraction_bound_qt"]) + np.asarray(kin["fraction_bound_ft"])) / 2)
+    put("fraction_bound", kin["times"], weighted_fraction_bound(kin))
 
     # ---------------- structural statistics ----------------
     structural: Dict[str, Any] = {"n_replicas": np.array([1])}
@@ -2547,6 +2546,31 @@ def build_single_run_plotting_data(
             structural[key] = np.array([arr[-1]])
 
     return stats, structural, config.to_dict()
+
+
+def weighted_fraction_bound(kinetics: Dict[str, Any]) -> np.ndarray:
+    """Particle-weighted bound fraction from a ``get_binding_kinetics`` result.
+
+    ``(QtC + FtC) / (all particles)`` — each *particle* counts once. This is the
+    micro-average, and is what "fraction bound" is taken to mean in the summaries and
+    tables.
+
+    Note the contrast with the macro-average ``(fraction_bound_qt + fraction_bound_ft)/2``,
+    which weights each *species* equally instead. The two agree exactly when the species
+    counts are equal, and diverge as the ratio becomes lopsided: measured across the swept
+    ratios, the final values differ by 0.000 at 200:200, 0.011 at 400:200, 0.046 at 600:200
+    and 0.298 at 600:50. The weighted form is used because the comparison tables place these
+    numbers side by side across different Qt:Ft ratios, where a species-weighted average
+    would carry a different implicit weighting in every column.
+
+    Shared by ``EnsembleSimulation.compute_statistics`` and
+    ``build_single_run_plotting_data`` so the two pipelines cannot drift apart.
+    """
+    bound = (np.asarray(kinetics["clustered_qt"], dtype=float)
+             + np.asarray(kinetics["clustered_ft"], dtype=float))
+    total = bound + (np.asarray(kinetics["free_qt"], dtype=float)
+                     + np.asarray(kinetics["free_ft"], dtype=float))
+    return np.divide(bound, total, out=np.zeros_like(bound), where=total > 0)
 
 
 def get_large_cluster_counts(

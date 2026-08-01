@@ -405,6 +405,13 @@ This (re)writes `ensemble_statistics.json` and `ensemble_structural.npz`.
 
 **Metrics computed** (`qtft.analysis`):
 - **Kinetics:** bond counts over time, binding rate, free vs clustered Qt/Ft, fraction bound, half-times.
+  `fraction_bound` is **particle-weighted** — `(QtC + FtC) / (all particles)`, each particle
+  counted once (`analysis.weighted_fraction_bound`). Note this is not the mean of the two
+  per-species fractions: those agree only when the species counts are equal, and diverge as the
+  ratio becomes lopsided (measured final-value difference: 0.000 at 200:200, 0.046 at 600:200,
+  0.298 at 600:50). The weighted form is used because the comparison tables put this number
+  side by side across different Qt:Ft ratios. Per-species fractions remain available as
+  `fraction_bound_qt` / `fraction_bound_ft` from `get_binding_kinetics`.
 - **Cluster stats:** number of clusters, size distribution, average & largest cluster size, adaptive size-category fractions (monomers / small / medium / large / very large).
 - **Morphology:** radius of gyration Rg per cluster and normalized compactness (Rg/Rg_ideal).
 - **Spatial:** cluster centers (PBC-aware), inter- and intra-cluster nearest-neighbor distances.

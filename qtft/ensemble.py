@@ -60,6 +60,7 @@ from .analysis import (
     get_cluster_statistics,
     get_bond_counts,
     get_binding_kinetics,
+    weighted_fraction_bound,
     get_cluster_morphology,
     get_spatial_distribution,
     get_contact_analysis,
@@ -69,13 +70,9 @@ from .analysis import (
     _size_category_key,
 )
 
-# Try to import scipy for interpolation (used in compute_statistics)
-try:
-    from scipy import interpolate as scipy_interpolate
-    SCIPY_AVAILABLE = True
-except ImportError:
-    SCIPY_AVAILABLE = False
-    scipy_interpolate = None
+# Note: replica reconciliation uses numpy's linear interpolation (_on_grid), so scipy is
+# no longer a requirement here — the common grid always lies inside every replica's span,
+# so no extrapolation is needed.
 
 
 
@@ -151,6 +148,41 @@ def _compute_replica_structural(h5_file: str, config: SimulationConfig, stride: 
         except Exception as e:
             result['errors'].append(f"{key}: {e}")
     return result
+
+
+def _common_time_grid(all_times: List[np.ndarray]) -> Tuple[np.ndarray, bool]:
+    """Common time axis for a set of replica series.
+
+    Returns ``(grid, identical)``. When every replica shares the same axis — the normal
+    case — the axis is returned unchanged and no interpolation is needed. Otherwise the
+    grid spans the *overlap* of the replicas at the coarsest resolution present, so no
+    series is ever extrapolated.
+
+    Shared by ``compute_statistics`` and ``compute_structural_statistics`` so both reconcile
+    unequal replicas the same way. (They previously disagreed: one interpolated, the other
+    truncated to the shortest replica, which silently discarded the tail of longer replicas
+    and could leave the time-series and structural spans describing different intervals.)
+    """
+    reference = np.asarray(all_times[0], dtype=float)
+    identical = all(
+        len(t) == len(reference) and np.allclose(np.asarray(t, dtype=float), reference)
+        for t in all_times
+    )
+    if identical:
+        return reference, True
+    t_min = max(float(np.asarray(t)[0]) for t in all_times)
+    t_max = min(float(np.asarray(t)[-1]) for t in all_times)
+    n_points = min(len(t) for t in all_times)
+    return np.linspace(t_min, t_max, n_points), False
+
+
+def _on_grid(times, values, grid: np.ndarray, identical: bool) -> np.ndarray:
+    """Put one replica's series on ``grid`` (linear); pass through if axes already agree."""
+    values = np.asarray(values, dtype=float)
+    if identical:
+        return values
+    # grid lies inside every replica's span by construction, so no extrapolation occurs.
+    return np.interp(grid, np.asarray(times, dtype=float), values)
 
 
 def _analyze_replica_structural_worker(args) -> Dict:
@@ -1047,42 +1079,20 @@ echo "Analysis completed at $(date)"
         if n_replicas == 0:
             raise RuntimeError("No replica data available")
         
-        # Determine common time grid
+        # Determine common time grid (shared with compute_structural_statistics)
         all_times = [d['times'] for d in self.replica_data['bonds']]
-        
-        # Check if all times are identical
-        reference_times = all_times[0]
-        times_identical = all(
-            len(t) == len(reference_times) and np.allclose(t, reference_times) 
-            for t in all_times
-        )
-        
+        common_times, times_identical = _common_time_grid(all_times)
         if times_identical:
-            common_times = reference_times
             logger.info(f"  Time grids identical across replicas ({len(common_times)} points)")
         else:
-            # Interpolate to common grid
-            if not SCIPY_AVAILABLE:
-                raise RuntimeError(
-                    "scipy is required for interpolation when time grids differ. "
-                    "Install with: pip install scipy"
-                )
-            t_min = max(t[0] for t in all_times)
-            t_max = min(t[-1] for t in all_times)
-            n_points = min(len(t) for t in all_times)
-            common_times = np.linspace(t_min, t_max, n_points)
-            logger.info(f"  Interpolating to common time grid ({n_points} points)")
-        
+            logger.info(f"  Interpolating to common time grid ({len(common_times)} points)")
+
         self.statistics['times'] = common_times
         self.statistics['n_replicas'] = n_replicas
-        
+
         # Interpolation + aggregation helpers (one path for every metric).
         def interp(times, values):
-            if times_identical:
-                return values
-            f = scipy_interpolate.interp1d(times, values, kind='linear',
-                                           bounds_error=False, fill_value='extrapolate')
-            return f(common_times)
+            return _on_grid(times, values, common_times, times_identical)
 
         def agg(source_list, getter, name):
             """Stack one metric across replicas (skipping None) into mean/std/all arrays."""
@@ -1111,9 +1121,10 @@ echo "Analysis completed at $(date)"
 
         agg(rd['reaction_counts'], lambda d: d['cumulative'], 'cumulative_reactions')
 
-        # Fraction bound = mean of the Qt and Ft fraction bound.
-        agg(rd['kinetics'], lambda d: (d['fraction_bound_qt'] + d['fraction_bound_ft']) / 2,
-            'fraction_bound')
+        # Fraction bound: particle-weighted, (QtC+FtC)/all — see
+        # analysis.weighted_fraction_bound for why this rather than the mean of the two
+        # per-species fractions (they diverge once the Qt:Ft ratio is lopsided).
+        agg(rd['kinetics'], weighted_fraction_bound, 'fraction_bound')
 
         logger.info("✓ Statistics computed")
     
@@ -1402,26 +1413,34 @@ echo "Analysis completed at $(date)"
         
         # Helper to process data lists into mean/std arrays
         def process_data(data_list, time_key, keys):
-            """Process data list into mean/std/all arrays with explicit time key."""
+            """Process data list into mean/std/all arrays with explicit time key.
+
+            Uses the same reconciliation as compute_statistics (_common_time_grid /
+            _on_grid): identical axes pass through untouched, unequal ones are interpolated
+            onto their overlap. Previously this truncated every replica to the shortest,
+            which discarded the tail of longer replicas and compared sample i of one replica
+            against sample i of another even when their times differed.
+            """
             valid = [d for d in data_list if d is not None]
             if not valid:
                 return
-            
-            # Get common time grid (shortest)
-            all_times = [d['times'] for d in valid]
-            min_len = min(len(t) for t in all_times)
-            self.structural_statistics[time_key] = valid[0]['times'][:min_len]
-            
+
+            grid, identical = _common_time_grid([d['times'] for d in valid])
+            self.structural_statistics[time_key] = grid
+
             for key in keys:
                 if key not in valid[0]:
                     continue
-                
+
                 values = []
                 for d in valid:
-                    v = d[key][:min_len] if len(d[key]) >= min_len else d[key]
-                    if len(v) == min_len:
-                        values.append(v)
-                
+                    if len(d[key]) != len(d['times']):
+                        logger.warning(
+                            f"    {key}: series length {len(d[key])} != times "
+                            f"{len(d['times'])} for one replica; skipping it")
+                        continue
+                    values.append(_on_grid(d['times'], d[key], grid, identical))
+
                 if values:
                     matrix = np.array(values)
                     self.structural_statistics[f'{key}_mean'] = np.mean(matrix, axis=0)
@@ -1458,10 +1477,9 @@ echo "Analysis completed at $(date)"
         
         valid_sf = [d for d in size_fraction_data if d is not None]
         if valid_sf:
-            # Get common time grid
-            all_times = [d['times'] for d in valid_sf]
-            min_len = min(len(t) for t in all_times)
-            self.structural_statistics['size_fractions_times'] = valid_sf[0]['times'][:min_len]
+            # Same reconciliation as the other aggregators.
+            sf_grid, sf_identical = _common_time_grid([d['times'] for d in valid_sf])
+            self.structural_statistics['size_fractions_times'] = sf_grid
             
             # Store category names as numpy string array (NPZ-compatible)
             category_names = valid_sf[0]['category_names']
@@ -1477,9 +1495,8 @@ echo "Analysis completed at $(date)"
             for cat_name in category_names:
                 values = []
                 for d in valid_sf:
-                    v = d['category_fractions'][cat_name][:min_len]
-                    if len(v) == min_len:
-                        values.append(v)
+                    values.append(_on_grid(d['times'], d['category_fractions'][cat_name],
+                                           sf_grid, sf_identical))
                 if values:
                     matrix = np.array(values)
                     safe_key = _size_category_key(cat_name)
