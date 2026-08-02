@@ -59,7 +59,8 @@ from .analysis import (
     get_cluster_statistics,
     get_bond_counts,
     get_binding_kinetics,
-    weighted_fraction_bound,
+    collect_run_series,
+    TIME_SERIES_METRICS,
     get_cluster_morphology,
     get_spatial_distribution,
     get_contact_analysis,
@@ -972,86 +973,17 @@ echo "Analysis completed at $(date)"
                 continue
 
             logger.info(f"  Replica {i}: Loading...")
-            
+
             try:
-                # Open the trajectory once and reuse the handle for every observable
-                # read below, instead of reopening the HDF5 file in each get_* call.
-                traj = readdy.Trajectory(h5_file)
-
-                # Load basic data (silent=True to avoid per-replica bond method output)
-                bonds_data = get_bond_counts(h5_file, trajectory=traj, silent=True)
-                self.replica_data['bonds'].append(bonds_data)
-                self.replica_data['times'].append(bonds_data['times'])
-
-                # Energy
-                try:
-                    times_e, energy = traj.read_observable_energy()
-                    self.replica_data['energy'].append({
-                        'times': np.array(times_e),
-                        'energy': np.array(energy)
-                    })
-                except (KeyError, ValueError, IndexError):
-                    self.replica_data['energy'].append(None)
-                
-                # Pressure
-                try:
-                    times_p, pressure = traj.read_observable_pressure()
-                    self.replica_data['pressure'].append({
-                        'times': np.array(times_p),
-                        'pressure': np.array(pressure)
-                    })
-                except (KeyError, ValueError, IndexError):
-                    self.replica_data['pressure'].append(None)
-                
-                # Particle counts
-                try:
-                    times_pc, counts = traj.read_observable_number_of_particles()
-                    self.replica_data['particle_counts'].append({
-                        'times': np.array(times_pc),
-                        'counts': np.array(counts),  # Shape: (n_frames, n_types)
-                    })
-                except (KeyError, ValueError, IndexError):
-                    self.replica_data['particle_counts'].append(None)
-                
-                # Cluster statistics
-                try:
-                    cluster_stats = get_cluster_statistics(h5_file, trajectory=traj)
-                    self.replica_data['cluster_stats'].append(cluster_stats)
-                except (KeyError, ValueError, IndexError):
-                    self.replica_data['cluster_stats'].append(None)
-                
-                # Binding kinetics
-                try:
-                    kinetics = get_binding_kinetics(h5_file, config, trajectory=traj)
-                    self.replica_data['kinetics'].append(kinetics)
-                except (KeyError, ValueError, IndexError):
-                    self.replica_data['kinetics'].append(None)
-                
-                # Reaction counts (cumulative)
-                try:
-                    times_r, counts_dict = traj.read_observable_reaction_counts()
-                    times_r = np.array(times_r)
-                    # Sum all reaction types to get total cumulative
-                    total_cumulative = np.zeros(len(times_r))
-                    
-                    def extract_series(obj):
-                        if isinstance(obj, dict):
-                            for v in obj.values():
-                                yield from extract_series(v)
-                        else:
-                            yield np.asarray(obj).flatten()
-                    
-                    for series in extract_series(counts_dict):
-                        if len(series) == len(times_r):
-                            total_cumulative += np.cumsum(series)
-                    
-                    self.replica_data['reaction_counts'].append({
-                        'times': times_r,
-                        'cumulative': total_cumulative
-                    })
-                except (KeyError, ValueError, IndexError):
-                    self.replica_data['reaction_counts'].append(None)
-                
+                # One shared reader for a plain trajectory (analysis.collect_run_series);
+                # phased replicas go through _collect_phased_replica above, which returns
+                # the same shape.
+                entries = collect_run_series(h5_file, config)
+                self.replica_data['bonds'].append(entries['bonds'])
+                self.replica_data['times'].append(entries['bonds']['times'])
+                for key in ('energy', 'pressure', 'particle_counts',
+                            'cluster_stats', 'kinetics', 'reaction_counts'):
+                    self.replica_data[key].append(entries[key])
                 self.replica_data['available_replicas'].append(i)
                 
             except Exception as e:
@@ -1112,26 +1044,10 @@ echo "Analysis completed at $(date)"
             self.statistics[f'{name}_all'] = matrix
 
         rd = self.replica_data
-        agg(rd['bonds'], lambda d: d['n_bonds'], 'bonds')
-        agg(rd['energy'], lambda d: d['energy'], 'energy')
-        agg(rd['pressure'], lambda d: d['pressure'], 'pressure')
-
-        # Particle counts: Qt, Ft, QtC, FtC (indices 0..3), then the total.
-        for idx, name in enumerate(['qt', 'ft', 'qtc', 'ftc']):
-            agg(rd['particle_counts'], lambda d, idx=idx: d['counts'][:, idx], f'{name}_count')
-        agg(rd['particle_counts'], lambda d: d['counts'].sum(axis=1), 'total_count')
-
-        # Cluster statistics (get_cluster_statistics returns 'max_sizes' / 'avg_sizes').
-        agg(rd['cluster_stats'], lambda d: d['n_clusters'], 'n_clusters')
-        agg(rd['cluster_stats'], lambda d: d['max_sizes'], 'largest_cluster')
-        agg(rd['cluster_stats'], lambda d: d['avg_sizes'], 'avg_cluster')
-
-        agg(rd['reaction_counts'], lambda d: d['cumulative'], 'cumulative_reactions')
-
-        # Fraction bound: particle-weighted, (QtC+FtC)/all — see
-        # analysis.weighted_fraction_bound for why this rather than the mean of the two
-        # per-species fractions (they diverge once the Qt:Ft ratio is lopsided).
-        agg(rd['kinetics'], weighted_fraction_bound, 'fraction_bound')
+        # One metric table, shared with analysis.build_single_run_plotting_data, so the
+        # ensemble and single-run pipelines cannot list different metrics.
+        for name, source, getter in TIME_SERIES_METRICS:
+            agg(rd[source], getter, name)
 
         logger.info("✓ Statistics computed")
     

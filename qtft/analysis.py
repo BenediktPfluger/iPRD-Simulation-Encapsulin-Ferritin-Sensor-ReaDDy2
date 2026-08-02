@@ -2332,6 +2332,124 @@ def _to_grid(src_times: np.ndarray, values: np.ndarray, grid: np.ndarray) -> np.
     return np.interp(grid, src_times, values)
 
 
+def weighted_fraction_bound(kinetics: Dict[str, Any]) -> np.ndarray:
+    """Particle-weighted bound fraction from a ``get_binding_kinetics`` result.
+
+    ``(QtC + FtC) / (all particles)`` — each *particle* counts once. This is the
+    micro-average, and is what "fraction bound" is taken to mean in the summaries and
+    tables.
+
+    Note the contrast with the macro-average ``(fraction_bound_qt + fraction_bound_ft)/2``,
+    which weights each *species* equally instead. The two agree exactly when the species
+    counts are equal, and diverge as the ratio becomes lopsided: measured across the swept
+    ratios, the final values differ by 0.000 at 200:200, 0.011 at 400:200, 0.046 at 600:200
+    and 0.298 at 600:50. The weighted form is used because the comparison tables place these
+    numbers side by side across different Qt:Ft ratios, where a species-weighted average
+    would carry a different implicit weighting in every column.
+
+    Shared by ``EnsembleSimulation.compute_statistics`` and
+    ``build_single_run_plotting_data`` so the two pipelines cannot drift apart.
+    """
+    bound = (np.asarray(kinetics["clustered_qt"], dtype=float)
+             + np.asarray(kinetics["clustered_ft"], dtype=float))
+    total = bound + (np.asarray(kinetics["free_qt"], dtype=float)
+                     + np.asarray(kinetics["free_ft"], dtype=float))
+    return np.divide(bound, total, out=np.zeros_like(bound), where=total > 0)
+
+
+def collect_run_series(
+    h5_file: str,
+    config: SimulationConfig,
+    trajectory: Optional[readdy.Trajectory] = None,
+) -> Dict[str, Optional[Dict]]:
+    """Read one trajectory into the per-run series dicts the statistics table consumes.
+
+    Returns ``{'bonds', 'energy', 'pressure', 'particle_counts', 'cluster_stats',
+    'kinetics', 'reaction_counts'}``; a value is ``None`` when that observable was not
+    registered for the run, which the aggregators skip.
+
+    This is the plain-trajectory counterpart of ``ensemble._collect_phased_replica``, which
+    produces the same shape by stitching a phased run's per-phase files. Both an ensemble
+    replica and a standalone single run go through one of the two, so the two statistics
+    pipelines read their inputs identically.
+    """
+    traj = trajectory if trajectory is not None else readdy.Trajectory(h5_file)
+    out: Dict[str, Optional[Dict]] = {}
+
+    out["bonds"] = get_bond_counts(h5_file, trajectory=traj, silent=True)
+
+    try:
+        t, v = traj.read_observable_energy()
+        out["energy"] = {"times": np.array(t), "energy": np.array(v)}
+    except (KeyError, ValueError, IndexError):
+        out["energy"] = None
+
+    try:
+        t, v = traj.read_observable_pressure()
+        out["pressure"] = {"times": np.array(t), "pressure": np.array(v)}
+    except (KeyError, ValueError, IndexError):
+        out["pressure"] = None
+
+    try:
+        t, counts = traj.read_observable_number_of_particles()
+        out["particle_counts"] = {"times": np.array(t),
+                                  "counts": np.array(counts)}   # (n_frames, n_types)
+    except (KeyError, ValueError, IndexError):
+        out["particle_counts"] = None
+
+    try:
+        out["cluster_stats"] = get_cluster_statistics(h5_file, trajectory=traj)
+    except (KeyError, ValueError, IndexError):
+        out["cluster_stats"] = None
+
+    try:
+        out["kinetics"] = get_binding_kinetics(h5_file, config, trajectory=traj)
+    except (KeyError, ValueError, IndexError):
+        out["kinetics"] = None
+
+    try:
+        times_r, counts_dict = traj.read_observable_reaction_counts()
+        times_r = np.array(times_r)
+        total = np.zeros(len(times_r))
+
+        def _series(obj):
+            if isinstance(obj, dict):
+                for v in obj.values():
+                    yield from _series(v)
+            else:
+                yield np.asarray(obj).flatten()
+
+        for s in _series(counts_dict):
+            if len(s) == len(times_r):
+                total += np.cumsum(s)
+        out["reaction_counts"] = {"times": times_r, "cumulative": total}
+    except (KeyError, ValueError, IndexError):
+        out["reaction_counts"] = None
+
+    return out
+
+
+# The one place that lists the aggregated time-series metrics: (name, source, getter).
+# Driven by EnsembleSimulation.compute_statistics across replicas and by
+# build_single_run_plotting_data for a single run, so neither can gain a metric the other
+# lacks — `cumulative_reactions` was ensemble-only before this table existed.
+TIME_SERIES_METRICS: List[Tuple[str, str, Any]] = [
+    ("bonds",                "bonds",           lambda d: d["n_bonds"]),
+    ("energy",               "energy",          lambda d: d["energy"]),
+    ("pressure",             "pressure",        lambda d: d["pressure"]),
+    ("qt_count",             "particle_counts", lambda d: d["counts"][:, 0]),
+    ("ft_count",             "particle_counts", lambda d: d["counts"][:, 1]),
+    ("qtc_count",            "particle_counts", lambda d: d["counts"][:, 2]),
+    ("ftc_count",            "particle_counts", lambda d: d["counts"][:, 3]),
+    ("total_count",          "particle_counts", lambda d: d["counts"].sum(axis=1)),
+    ("n_clusters",           "cluster_stats",   lambda d: d["n_clusters"]),
+    ("largest_cluster",      "cluster_stats",   lambda d: d["max_sizes"]),
+    ("avg_cluster",          "cluster_stats",   lambda d: d["avg_sizes"]),
+    ("cumulative_reactions", "reaction_counts", lambda d: d["cumulative"]),
+    ("fraction_bound",       "kinetics",        weighted_fraction_bound),
+]
+
+
 def build_single_run_plotting_data(
     h5_file: str,
     config: SimulationConfig,
@@ -2370,43 +2488,21 @@ def build_single_run_plotting_data(
     trajectory = readdy.Trajectory(h5_file)
 
     # ---------------- time-series statistics ----------------
-    bonds = get_bond_counts(h5_file, trajectory=trajectory, silent=True)
-    times = np.asarray(bonds["times"], dtype=float)
+    # Same source dicts and same metric table the ensemble aggregator uses, so a single run
+    # and that run as a replica produce identical series under identical key names.
+    series = collect_run_series(h5_file, config, trajectory=trajectory)
+    times = np.asarray(series["bonds"]["times"], dtype=float)
     stats: Dict[str, Any] = {"times": times, "n_replicas": 1}
 
-    def put(name, src_times, values):
-        v = _to_grid(src_times, values, times)
+    for name, source, getter in TIME_SERIES_METRICS:
+        src = series.get(source)
+        if src is None:
+            logger.info("  build_single_run_plotting_data: no '%s' data", source)
+            continue
+        v = _to_grid(src["times"], getter(src), times)
         stats[f"{name}_mean"] = v
         stats[f"{name}_std"] = np.zeros_like(v)
         stats[f"{name}_all"] = v[None, :]
-
-    put("bonds", bonds["times"], bonds["n_bonds"])
-
-    for obs_name, reader in (("energy", "read_observable_energy"),
-                             ("pressure", "read_observable_pressure")):
-        try:
-            t_obs, vals = getattr(trajectory, reader)()
-            put(obs_name, t_obs, vals)
-        except (KeyError, ValueError, IndexError, RuntimeError, OSError):
-            logger.info("  build_single_run_plotting_data: no '%s' observable", obs_name)
-
-    try:
-        t_pc, counts = trajectory.read_observable_number_of_particles()
-        counts = np.asarray(counts)
-        # Column order matches ensemble.compute_statistics: Qt, Ft, QtC, FtC.
-        for idx, name in enumerate(["qt", "ft", "qtc", "ftc"]):
-            put(f"{name}_count", t_pc, counts[:, idx])
-        put("total_count", t_pc, counts.sum(axis=1))
-    except (KeyError, ValueError, IndexError, RuntimeError, OSError):
-        logger.info("  build_single_run_plotting_data: no particle-count observable")
-
-    cl = get_cluster_statistics(h5_file, trajectory=trajectory)
-    put("n_clusters", cl["times"], cl["n_clusters"])
-    put("largest_cluster", cl["times"], cl["max_sizes"])
-    put("avg_cluster", cl["times"], cl["avg_sizes"])
-
-    kin = get_binding_kinetics(h5_file, config, trajectory=trajectory)
-    put("fraction_bound", kin["times"], weighted_fraction_bound(kin))
 
     # ---------------- structural statistics ----------------
     structural: Dict[str, Any] = {"n_replicas": np.array([1])}
@@ -2467,31 +2563,6 @@ def build_single_run_plotting_data(
             structural[key] = np.array([arr[-1]])
 
     return stats, structural, config.to_dict()
-
-
-def weighted_fraction_bound(kinetics: Dict[str, Any]) -> np.ndarray:
-    """Particle-weighted bound fraction from a ``get_binding_kinetics`` result.
-
-    ``(QtC + FtC) / (all particles)`` — each *particle* counts once. This is the
-    micro-average, and is what "fraction bound" is taken to mean in the summaries and
-    tables.
-
-    Note the contrast with the macro-average ``(fraction_bound_qt + fraction_bound_ft)/2``,
-    which weights each *species* equally instead. The two agree exactly when the species
-    counts are equal, and diverge as the ratio becomes lopsided: measured across the swept
-    ratios, the final values differ by 0.000 at 200:200, 0.011 at 400:200, 0.046 at 600:200
-    and 0.298 at 600:50. The weighted form is used because the comparison tables place these
-    numbers side by side across different Qt:Ft ratios, where a species-weighted average
-    would carry a different implicit weighting in every column.
-
-    Shared by ``EnsembleSimulation.compute_statistics`` and
-    ``build_single_run_plotting_data`` so the two pipelines cannot drift apart.
-    """
-    bound = (np.asarray(kinetics["clustered_qt"], dtype=float)
-             + np.asarray(kinetics["clustered_ft"], dtype=float))
-    total = bound + (np.asarray(kinetics["free_qt"], dtype=float)
-                     + np.asarray(kinetics["free_ft"], dtype=float))
-    return np.divide(bound, total, out=np.zeros_like(bound), where=total > 0)
 
 
 def get_large_cluster_counts(
