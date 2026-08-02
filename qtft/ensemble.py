@@ -274,7 +274,15 @@ def _collect_phased_replica(config: SimulationConfig) -> Dict[str, Optional[Dict
 
         try:
             kin = get_binding_kinetics(f, config, trajectory=traj)
+            # Carry the per-species counts as well as the fractions: the aggregated
+            # fraction_bound is particle-weighted (analysis.weighted_fraction_bound), which
+            # needs the counts. Keeping only the two fractions here made compute_statistics
+            # raise KeyError for phased ensembles.
             parts['kinetics'].append({'times': np.asarray(kin['times']) + off,
+                                      'free_qt': np.asarray(kin['free_qt']),
+                                      'free_ft': np.asarray(kin['free_ft']),
+                                      'clustered_qt': np.asarray(kin['clustered_qt']),
+                                      'clustered_ft': np.asarray(kin['clustered_ft']),
                                       'fraction_bound_qt': np.asarray(kin['fraction_bound_qt']),
                                       'fraction_bound_ft': np.asarray(kin['fraction_bound_ft'])})
         except (KeyError, ValueError, IndexError):
