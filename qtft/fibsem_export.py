@@ -238,39 +238,22 @@ def load_final_frame(h5_file: str, config, verbose: bool = True):
 
 
 def find_run_files(sim_dir: str, trajectory: str = None, config_json: str = None):
-    """Resolve a run directory to (trajectory_path, config_path).
+    """Resolve a run directory to ``(trajectory_path, config_path)``.
 
-    Handles this project's layouts so the caller does not have to: plain single runs
-    (``trajectory.h5`` + ``<param_string>_config.json``), phased agglomeration<->
-    deagglomeration runs (``trajectory_combined.h5``, else the last ``phase_NNN/``), and
-    ensemble replica directories (``ensemble_config.json`` one level up).
+    The trajectory is resolved by :func:`qtft.analysis.resolve_trajectory`, the single place
+    that knows this project's run layouts (plain run, ensemble replica, phased run, or a
+    run whose phases were never combined). The config is found here: ``<param_string>_config.json``
+    for a single run, or ``ensemble_config.json`` for a replica (also one level up).
 
     Explicit ``trajectory`` / ``config_json`` (absolute, or relative to ``sim_dir``) always win.
     """
     import glob
+    from .analysis import resolve_trajectory
 
-    def _resolve(name):
-        return name if os.path.isabs(name) else os.path.join(sim_dir, name)
+    traj = resolve_trajectory(sim_dir, explicit=trajectory)
 
-    # --- trajectory ---
-    if trajectory:
-        traj = _resolve(trajectory)
-    else:
-        candidates = [os.path.join(sim_dir, "trajectory.h5"),
-                      os.path.join(sim_dir, "trajectory_combined.h5")]
-        phase_dirs = sorted(glob.glob(os.path.join(sim_dir, "phase_*")))
-        if phase_dirs:                       # last phase = end of the cycle
-            candidates.append(os.path.join(phase_dirs[-1], "trajectory.h5"))
-        candidates += sorted(glob.glob(os.path.join(sim_dir, "*.h5")))
-        traj = next((c for c in candidates if os.path.isfile(c)), None)
-        if traj is None:
-            raise FileNotFoundError(
-                f"No trajectory found in {sim_dir!r} (looked for trajectory.h5, "
-                f"trajectory_combined.h5, phase_*/trajectory.h5, *.h5)")
-
-    # --- config ---
     if config_json:
-        cfg = _resolve(config_json)
+        cfg = config_json if os.path.isabs(config_json) else os.path.join(sim_dir, config_json)
     else:
         cands = sorted(glob.glob(os.path.join(sim_dir, "*_config.json")))
         cands += [os.path.join(sim_dir, "ensemble_config.json"),
@@ -280,8 +263,6 @@ def find_run_files(sim_dir: str, trajectory: str = None, config_json: str = None
             raise FileNotFoundError(
                 f"No config JSON found for {sim_dir!r} (looked for *_config.json and "
                 f"ensemble_config.json here and one level up)")
-    if not os.path.isfile(traj):
-        raise FileNotFoundError(f"Trajectory not found: {traj}")
     if not os.path.isfile(cfg):
         raise FileNotFoundError(f"Config not found: {cfg}")
     return traj, cfg

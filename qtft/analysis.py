@@ -1383,82 +1383,6 @@ def get_cluster_composition(
 
 
 
-def compute_structural_analysis(
-    h5_file: str,
-    config: SimulationConfig,
-    stride: int = 1,
-    min_cluster_size_morphology: int = 3,
-    min_cluster_size_spatial: int = 2,
-) -> Dict[str, Any]:
-    """
-    Compute all structural cluster analysis data without plotting.
-    
-    This function performs the computationally expensive analysis and returns
-    the data, which can then be plotted with the ensemble panel or
-    saved for later use.
-    
-    Parameters
-    ----------
-    h5_file : str
-        Path to trajectory HDF5 file
-    config : SimulationConfig
-        Simulation configuration
-    stride : int
-        Analyze every Nth frame for detailed analyses (morphology, spatial, contacts).
-        Note: Kinetics always uses all frames as it relies on pre-computed observables.
-    min_cluster_size_morphology : int
-        Minimum cluster size for Rg calculation
-    min_cluster_size_spatial : int
-        Minimum cluster size for spatial analysis
-    
-    Returns
-    -------
-    dict with keys:
-        morphology : dict - Radius of gyration and compactness data
-        kinetics : dict - Binding rates and particle counts
-        spatial : dict - Nearest neighbor distances and cluster positions
-        contacts : dict - Coordination numbers and bond counts per cluster
-        config : SimulationConfig - The configuration used (for plotting)
-    """
-    logger.info("\n" + "=" * 60)
-    logger.info("COMPUTING STRUCTURAL CLUSTER ANALYSIS")
-    logger.info("=" * 60)
-    
-    # Extract frame data ONCE and share between analysis functions
-    logger.info("\n[1/5] Extracting frame data...")
-    frame_data = _extract_frame_data(h5_file, config, stride=stride)
-    logger.info(f"       Extracted {frame_data['n_frames']} frames")
-    
-    # Run all analyses using shared frame_data
-    logger.info("\n[2/5] Morphology analysis...")
-    morphology = get_cluster_morphology(h5_file, config, stride=stride, 
-                                         min_cluster_size=min_cluster_size_morphology,
-                                         frame_data=frame_data)
-    
-    logger.info("\n[3/5] Binding kinetics analysis...")
-    kinetics = get_binding_kinetics(h5_file, config)
-    
-    logger.info("\n[4/5] Spatial distribution analysis...")
-    spatial = get_spatial_distribution(h5_file, config, stride=stride,
-                                        min_cluster_size=min_cluster_size_spatial,
-                                        frame_data=frame_data)
-    
-    logger.info("\n[5/5] Contact analysis...")
-    contacts = get_contact_analysis(h5_file, config, stride=stride,
-                                    frame_data=frame_data)
-    
-    logger.info("\n✓ Structural analysis complete")
-    
-    return {
-        "morphology": morphology,
-        "kinetics": kinetics,
-        "spatial": spatial,
-        "contacts": contacts,
-        "config": config,
-    }
-
-
-
 def print_analysis_summary(h5_file: str, config: Optional[SimulationConfig] = None):
     """
     Print a summary of simulation results.
@@ -2607,17 +2531,72 @@ def get_large_cluster_counts(
     return np.asarray(cl["times"], dtype=float), counts
 
 
-def _replica_trajectory(replica_dir: str) -> Optional[str]:
-    """Pick a replica's trajectory: combined (phased) > plain > last phase. None if absent."""
+def resolve_trajectory(
+    run_dir: str,
+    explicit: Optional[str] = None,
+    required: bool = True,
+) -> Optional[str]:
+    """Find the trajectory that represents a finished run directory.
+
+    The single resolver for every layout this project writes, so callers do not each
+    re-derive the rules:
+
+    ==========================================  ====================================
+    layout                                      file
+    ==========================================  ====================================
+    phased run (single or replica)              ``trajectory_combined.h5``
+    ensemble replica                            ``trajectory.h5``
+    single run (auto-named, see                 ``<dirname>.h5``
+    ``format_param_string``)
+    phased run whose combine step was skipped   last ``phase_NNN/trajectory.h5``
+    anything else with exactly one HDF5         that file
+    ==========================================  ====================================
+
+    The stitched ``trajectory_combined.h5`` is preferred whenever present because it carries
+    the whole cycle on one continuous step axis.
+
+    Parameters
+    ----------
+    run_dir : str
+        Run or replica directory.
+    explicit : str, optional
+        Caller-supplied path; returned as-is when given (absolute, or relative to ``run_dir``).
+    required : bool
+        Raise ``FileNotFoundError`` when nothing is found (default). Pass ``False`` to get
+        ``None`` instead — used when scanning replicas, where a missing one is skipped.
+    """
     import glob as _glob
-    combined = os.path.join(replica_dir, "trajectory_combined.h5")
-    plain = os.path.join(replica_dir, "trajectory.h5")
-    if os.path.isfile(combined):
-        return combined
-    if os.path.isfile(plain):
-        return plain
-    phases = sorted(_glob.glob(os.path.join(replica_dir, "phase_*", "trajectory.h5")))
-    return phases[-1] if phases else None
+
+    if explicit:
+        path = explicit if os.path.isabs(explicit) else os.path.join(run_dir, explicit)
+        if os.path.isfile(path):
+            return path
+        if required:
+            raise FileNotFoundError(f"Trajectory not found: {path}")
+        return None
+
+    name = os.path.basename(os.path.normpath(run_dir))
+    candidates = [
+        os.path.join(run_dir, "trajectory_combined.h5"),   # phased: the whole cycle
+        os.path.join(run_dir, "trajectory.h5"),            # ensemble replica
+        os.path.join(run_dir, name + ".h5"),               # single run, auto-named
+    ]
+    candidates += sorted(_glob.glob(os.path.join(run_dir, "phase_*", "trajectory.h5")))[-1:]
+    candidates += sorted(_glob.glob(os.path.join(run_dir, "*.h5")))
+
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
+    if required:
+        raise FileNotFoundError(
+            f"No trajectory found in {run_dir!r} (looked for trajectory_combined.h5, "
+            f"trajectory.h5, {name}.h5, phase_*/trajectory.h5, *.h5)")
+    return None
+
+
+def _replica_trajectory(replica_dir: str) -> Optional[str]:
+    """A replica's trajectory, or None when it has none (see :func:`resolve_trajectory`)."""
+    return resolve_trajectory(replica_dir, required=False)
 
 
 def get_large_cluster_counts_ensemble(
