@@ -42,9 +42,6 @@ import readdy
 # Import from simulation module
 from .config import (
     SimulationConfig,
-    ParticleConfig,
-    TopologyConfig,
-    LennardJonesConfig,
     NS_TO_US,
     _steps_to_us,
     format_duration,
