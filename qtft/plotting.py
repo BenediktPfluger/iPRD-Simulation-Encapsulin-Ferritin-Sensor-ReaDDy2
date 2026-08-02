@@ -55,20 +55,6 @@ def _time_axis(times_us):
     factor, unit = choose_time_unit(max_us)
     return arr * factor, f"Time ({unit})"
 
-# Import analysis functions needed by plotting
-from .analysis import (
-    get_cluster_statistics,
-    get_bond_counts,
-    get_cluster_composition,
-    get_size_fractions,
-    compute_structural_analysis,
-    load_phased_observables,
-    _extract_frame_data,
-    _get_size_categories,
-    _get_size_category_boundaries,
-    _apply_size_category,
-    _size_category_key,
-)
 
 
 # =============================================================================
