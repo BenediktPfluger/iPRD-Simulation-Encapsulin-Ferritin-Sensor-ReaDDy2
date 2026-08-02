@@ -1397,7 +1397,7 @@ def compute_structural_analysis(
     Compute all structural cluster analysis data without plotting.
     
     This function performs the computationally expensive analysis and returns
-    the data, which can then be plotted with plot_structural_analysis() or
+    the data, which can then be plotted with the ensemble panel or
     saved for later use.
     
     Parameters
@@ -2380,7 +2380,7 @@ def load_ensemble_data(results_dir: str) -> Tuple[Dict, Dict, Dict]:
     Example
     -------
     >>> stats, structural, config = load_ensemble_data("ensemble_results/")
-    >>> plot_ensemble_observables(stats, structural, config)
+    >>> plot_ensemble_panel(stats, structural, config)
     """
     stats, npz, config, meta = _load_ensemble_files(results_dir)
     logger.info(f"✓ Loaded statistics from {meta['stats_path']}")

@@ -234,8 +234,12 @@ trajectory = sim.run_one(config, skip_equilibration=True)
 
 # 6. Analyze + plot
 analysis.print_analysis_summary(config.output_file, config)
-plotting.plot_observables(config.output_file, config, save_path="plots_observables.svg")
-plotting.plot_cluster_analysis(config.output_file, config=config, save_path="plots_clusters.svg")
+# One triple drives every figure (see §9); a single run builds its own:
+stats, structural, cfg = analysis.build_single_run_plotting_data(config.output_file, config)
+plotting.plot_ensemble_panel(stats, structural, cfg, save_path_base="Plots/panel")
+plotting.plot_kinetics([{"label": "run",
+                         "data": analysis.build_kinetics_data_single(config.output_file, config)}],
+                       save_path_base="Plots/kinetics")
 
 # Optional: export for OVITO, and save the config
 analysis.convert_h5_to_xyz(config.output_file, config.output_file.replace(".h5", ".xyz"), config, overwrite=True)
@@ -332,10 +336,11 @@ ensemble.run_local(parallel=True, n_workers=10, overwrite=True, equilibration_st
 
 # Plot
 stats, structural, cfg = ensemble.to_plotting_format()
-plotting.plot_ensemble_observables(stats, structural, cfg, show_individual=True,
-                                   save_path="ensemble_observables.svg")
-plotting.plot_ensemble_structural(stats, structural, cfg, show_individual=True,
-                                  save_path="ensemble_structural.svg")
+plotting.plot_ensemble_panel(stats, structural, cfg, show_individual=True,
+                             save_path_base="Plots/panel")
+plotting.plot_kinetics([{"label": "ensemble",
+                         "data": analysis.build_kinetics_data_ensemble(stats, cfg)}],
+                       save_path_base="Plots/kinetics")
 ```
 
 `run_local` produces an output directory named from the parameter string containing:
@@ -451,71 +456,49 @@ or `comparison.build_comparison_table(comparison)` across ensembles, then
 
 ## 9. Plotting
 
-Driven from `Plot_Simulation_Results.ipynb` (one `MODE`-selected run cell); all plotting functions,
-including the composite panels, live in `qtft.plotting`.
+Driven from `Plot_Simulation_Results.ipynb` — one **Settings** cell and one **Run** cell. The
+run cell builds a list of labelled `(stats, structural, config)` triples and renders the same
+figures from it, so `MODE` decides only *how many* triples there are, not which figures appear:
 
-**Both modes report the same metrics**, so a figure can be picked for a talk regardless of how
-the run was analysed. Some quantities therefore appear in more than one figure by design:
+| `MODE` | triples | figures written to `Plots/` |
+|---|---|---|
+| `single` (plain **and** phased) | 1, from `analysis.build_single_run_plotting_data` | `panel`, `kinetics`, `large_clusters_min{N}` |
+| `ensemble` (plain **and** phased) | 1, from `analysis.load_ensemble_data` | `panel`, `kinetics`, `large_clusters_min{N}` |
+| `comparison` | one per entry in `ENSEMBLES_TO_COMPARE` | `panel`, `kinetics`, `large_clusters_min{N}` |
 
-| `MODE` | figures written to `Plots/` |
-|---|---|
-| `single` (plain **and** phased) | `run_panel` (the 12-metric panel) + `kinetics` + the four detailed figures below |
-| `ensemble`, plain | `ensemble_panel` |
-| `ensemble`, phased | `ensemble_panel` + `ensemble_kinetics` (from replica means) |
+Every figure is written as paired **SVG + PNG**. `SHOW_SPREAD` overlays per-replica traces
+(ensemble) or bands (comparison); it has no effect on a single run, which has no spread.
 
-A **single run** gets the ensemble panel via
-`analysis.build_single_run_plotting_data(h5, config, stride)`, which returns the same
-`(stats, structural, config)` triple as `load_ensemble_data` with `n_replicas=1` (every
-`*_std` zero, so no error band is drawn). It composes the ordinary single-run analyses using
-the ensemble's own key names, so a run plotted this way and the same run plotted as an
-ensemble replica give identical numbers. For a phased run, pass `trajectory_combined.h5`.
+**The three figures**
 
-The **kinetics** figure (bonds / fraction bound / average cluster size) is
-`plot_phased_kinetics`, fed by `analysis.load_phased_observables` (phased single run),
-`analysis.build_kinetics_data_single` (plain single run — no phase markers, pass your own
-`title`), or `analysis.build_kinetics_data_ensemble` (replica means; per-species bound
-fractions are derived from the stored particle counts, so no re-analysis is needed).
+- **`panel`** — the 12-metric overview: energy, pressure, bonds; particle counts, topologies,
+  average cluster size; largest cluster, particles by size category, mean radius of gyration;
+  mean cluster composition, coordination number, coordination distribution.
+  `plot_ensemble_panel(stats, structural, config)` for one target,
+  `plot_comparison_panel(comparison)` across several.
+- **`kinetics`** — `plot_kinetics(series, ...)`: bonds, fraction bound (Qt/Ft), and average
+  cluster size on one continuous time axis, with dashed phase-boundary markers for an
+  agglomeration↔deagglomeration run. Takes the same `series` list shape as the figure below,
+  so a comparison overlays one colour per ensemble (Qt solid, Ft dashed). Fed by
+  `analysis.load_phased_observables` (phased single run), `build_kinetics_data_single`
+  (plain single run) or `build_kinetics_data_ensemble` (replica means).
+- **`large_clusters_min{N}`** — `plot_large_cluster_count(series, min_size, timestep, ...)`:
+  the number of topologies holding at least `MIN_CLUSTER_SIZE` particles. This is what the
+  other figures miss — `n_clusters` counts every free monomer as a topology, and the size
+  categories report *particle fractions* rather than cluster counts — and the curve is
+  characteristically non-monotonic, rising as clusters nucleate then falling as they coalesce.
+  Data from `analysis.get_large_cluster_counts` / `get_large_cluster_counts_ensemble`, which
+  **re-read the replica trajectories** (the aggregated `.npz` stores no per-frame size
+  distribution), so the threshold stays freely adjustable at ≈ 2 s per replica.
 
-**Clusters above a size threshold** (its own cell + figure, `large_clusters_min{N}.svg/.png`,
-produced for **all four modes**): `plot_large_cluster_count` draws the number of topologies
-holding at least `MIN_CLUSTER_SIZE` particles over time — the quantity the other figures miss,
-since `n_clusters` counts every free monomer as a topology and the size categories report
-*particle fractions* rather than cluster counts. The curve is characteristically
-non-monotonic (it rises as clusters nucleate, then falls as they coalesce into fewer, larger
-ones). Data comes from `analysis.get_large_cluster_counts` /
-`get_large_cluster_counts_ensemble`, which **re-read the replica trajectories** — the
-aggregated `.npz` stores no per-frame size distribution, so this keeps the threshold freely
-adjustable with no change to the saved format. Budget ≈ 2 s per replica (≈ 20 s for a
-10-replica ensemble). Phased runs get the usual phase-boundary markers.
+Each mode also writes a final-state table (CSV + LaTeX) and a bonds time-series CSV per
+target; `single` additionally exports an OVITO `.xyz` when `EXPORT_XYZ` is set.
 
-**Single run, detailed:** `plot_observables`, `plot_cluster_analysis`,
-`plot_structural_cluster_analysis`, `plot_cluster_composition`. These now run for phased runs
-too, reading the stitched `trajectory_combined.h5`; its `reaction_counts` observable is
-deliberately dropped when the phases are combined, so the cumulative-reactions subplot shows
-"No data available" there.
-
-**Ensemble:** `plot_ensemble_observables`, `plot_ensemble_structural`,
-`plot_ensemble_size_categories` (all support `show_individual=True` to overlay replica traces), or the
-composite `plotting.plot_ensemble_panel(stats, structural, config, save_path_base=...)`. All ensemble
-plotters share the argument order `(stats, structural, config)` — the same order returned by
-`analysis.load_ensemble_data` and `EnsembleSimulation.to_plotting_format`.
-
-> The panel's last-row **Coordination Distribution (Final)** histogram (per-particle QtC/FtC
-> coordination, pooled over replicas and scaled to a mean count per replica) reads the
-> `final_coord_dist_qt` / `final_coord_dist_ft` / `final_coord_dist_n_replicas` keys of
-> `ensemble_structural.npz`. These were added later, so ensembles analysed before then render
-> that cell as "No data" — re-run `scripts/analyze_ensemble.py --ensemble-dir <dir>` to
-> populate them (no re-simulation needed). Not to be confused with
-> `plot_ensemble_structural`'s *Final Mean Coordination per Replica*, which histograms one
-> mean value per replica.
-
-**Cross-ensemble comparison:** build a comparison with
-`ae.compare_ensembles({label: dir, ...})` (from `qtft.comparison`, imported as `ae`), then:
-`plot_comparison_summary`, `plot_comparison_final_state`, `plot_comparison_structural`,
-`plot_comparison_size_categories`, or the composite
-`plotting.plot_comparison_panel(comparison, save_path_base=...)`. Inspect differing
-parameters with `ae.print_parameter_differences(comparison)` and persist with
-`ae.save_comparison_data(...)`.
+> The panel's **Coordination Distribution (Final)** cell reads the `final_coord_dist_qt` /
+> `final_coord_dist_ft` / `final_coord_dist_n_replicas` keys of `ensemble_structural.npz`.
+> These were added later, so ensembles analysed before then render that one cell as "No data" —
+> re-run `scripts/analyze_ensemble.py --ensemble-dir <dir>` to populate them (no re-simulation
+> needed).
 
 ---
 

@@ -414,7 +414,7 @@ def run_comparison(ensemble_specs: list, output_dir: str):
     logger.info(f"  import qtft.comparison as ae")
     logger.info(f"  import qtft.plotting as plotting")
     logger.info(f"  comparison = ae.load_comparison_data('{output_dir}')")
-    logger.info(f"  plotting.plot_comparison_summary(comparison)")
+    logger.info(f"  plotting.plot_comparison_panel(comparison)")
 
     return comparison
 

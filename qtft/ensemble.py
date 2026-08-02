@@ -14,7 +14,7 @@ Related modules:
     - qtft.plotting: all plotting and visualization
 
 This module has NO matplotlib dependency. For plotting ensemble results,
-use qtft.plotting.plot_ensemble_observables() and related functions.
+use qtft.plotting.plot_ensemble_panel() and related functions.
 
 Usage:
     import qtft
@@ -32,7 +32,7 @@ Usage:
 
     # After completion, plot results
     stats, structural, config_dict = ensemble.to_plotting_format()
-    plotting.plot_ensemble_observables(stats, structural, config_dict)
+    plotting.plot_ensemble_panel(stats, structural, config_dict)
 """
 
 from __future__ import annotations
@@ -436,7 +436,7 @@ class EnsembleSimulation:
     >>> # After runs complete, analyze
     >>> ensemble.collect_results()
     >>> ensemble.compute_statistics()
-    >>> ensemble.plot_observables(show_individual=True)
+    >>> plotting.plot_ensemble_panel(*ensemble.to_plotting_format())
     >>> 
     >>> # Structural analysis is computed automatically by run_local()
     >>> # To recompute manually with different stride:
@@ -1304,7 +1304,7 @@ echo "Analysis completed at $(date)"
         structural = dict(getattr(self, 'structural_statistics', {}))
         
         # Add final distribution values from basic statistics if not already present
-        # These are used by plot_ensemble_observables for histograms
+        # These are used by the ensemble panel's final-distribution cells
         if 'final_largest_values' not in structural and 'largest_cluster_all' in stats:
             structural['final_largest_values'] = stats['largest_cluster_all'][:, -1]
         if 'final_fraction_bound_values' not in structural and 'fraction_bound_all' in stats:
