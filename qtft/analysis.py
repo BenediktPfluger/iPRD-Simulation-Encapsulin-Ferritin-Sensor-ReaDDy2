@@ -2357,6 +2357,38 @@ def weighted_fraction_bound(kinetics: Dict[str, Any]) -> np.ndarray:
     return np.divide(bound, total, out=np.zeros_like(bound), where=total > 0)
 
 
+def _compute_replica_structural(h5_file: str, config: SimulationConfig, stride: int) -> Dict:
+    """Compute morphology/spatial/contacts/composition for one replica.
+
+    Shared by the sequential and parallel structural-analysis paths so both produce
+    identical per-replica results. Extracts frame data once and reuses it.
+
+    Returns
+    -------
+    dict with keys 'morphology', 'spatial', 'contacts', 'composition' (each a result
+    dict or None) and 'errors' (list of strings).
+    """
+    result = {'morphology': None, 'spatial': None, 'contacts': None,
+              'composition': None, 'errors': []}
+    try:
+        frame_data = _extract_frame_data(h5_file, config, stride=stride, verbose=False)
+    except Exception as e:
+        result['errors'].append(f"frame_data: {e}")
+        return result
+
+    for key, fn in (
+        ('morphology', get_cluster_morphology),
+        ('spatial', get_spatial_distribution),
+        ('contacts', get_contact_analysis),
+        ('composition', get_cluster_composition),
+    ):
+        try:
+            result[key] = fn(h5_file, config, stride=stride, frame_data=frame_data)
+        except Exception as e:
+            result['errors'].append(f"{key}: {e}")
+    return result
+
+
 def collect_run_series(
     h5_file: str,
     config: SimulationConfig,
@@ -2513,27 +2545,37 @@ def build_single_run_plotting_data(
         structural[f"{name}_std"] = np.zeros_like(v)
         structural[f"{name}_all"] = v[None, :]
 
-    morph = get_cluster_morphology(h5_file, config, stride=stride)
-    structural["morphology_times"] = np.asarray(morph["times"])
-    put_struct("mean_rg", morph["mean_rg"])
-    put_struct("std_rg", morph["std_rg"])
-    put_struct("mean_rg_normalized", morph["mean_rg_normalized"])
+    # One shared collector, so the four analyses share a single frame-data extraction
+    # instead of re-reading the trajectory four times (measured 35.3 s -> ~17 s on a
+    # 5001-frame replica). Same function the ensemble uses per replica, so the numbers
+    # are identical by construction.
+    res = _compute_replica_structural(h5_file, config, stride)
+    for err in res["errors"]:
+        logger.warning("  build_single_run_plotting_data: %s", err)
+    morph, contacts, comp, spatial = (res["morphology"], res["contacts"],
+                                      res["composition"], res["spatial"])
 
-    contacts = get_contact_analysis(h5_file, config, stride=stride)
-    structural["contacts_times"] = np.asarray(contacts["times"])
-    put_struct("mean_coord_qt", contacts["mean_coord_qt"])
-    put_struct("mean_coord_ft", contacts["mean_coord_ft"])
+    if morph is not None:
+        structural["morphology_times"] = np.asarray(morph["times"])
+        put_struct("mean_rg", morph["mean_rg"])
+        put_struct("std_rg", morph["std_rg"])
+        put_struct("mean_rg_normalized", morph["mean_rg_normalized"])
 
-    comp = get_cluster_composition(h5_file, config, stride=stride)
-    structural["composition_times"] = np.asarray(comp["times"])
-    put_struct("mean_composition", comp["mean_qt_fraction"])
+    if contacts is not None:
+        structural["contacts_times"] = np.asarray(contacts["times"])
+        put_struct("mean_coord_qt", contacts["mean_coord_qt"])
+        put_struct("mean_coord_ft", contacts["mean_coord_ft"])
 
-    spatial = get_spatial_distribution(h5_file, config, stride=stride)
-    structural["spatial_times"] = np.asarray(spatial["times"])
-    put_struct("mean_nn_dist", spatial["mean_nn_dist"])
-    put_struct("std_nn_dist", spatial["std_nn_dist"])
-    put_struct("mean_intra_nn_dist", spatial["mean_intra_nn_dist"])
-    put_struct("std_intra_nn_dist", spatial["std_intra_nn_dist"])
+    if comp is not None:
+        structural["composition_times"] = np.asarray(comp["times"])
+        put_struct("mean_composition", comp["mean_qt_fraction"])
+
+    if spatial is not None:
+        structural["spatial_times"] = np.asarray(spatial["times"])
+        put_struct("mean_nn_dist", spatial["mean_nn_dist"])
+        put_struct("std_nn_dist", spatial["std_nn_dist"])
+        put_struct("mean_intra_nn_dist", spatial["mean_intra_nn_dist"])
+        put_struct("std_intra_nn_dist", spatial["std_intra_nn_dist"])
 
     sf = get_size_fractions(h5_file, config)
     structural["size_fractions_times"] = np.asarray(sf["times"])
@@ -2547,18 +2589,21 @@ def build_single_run_plotting_data(
         structural[f"size_frac_{key}_mean"] = vals
         structural[f"size_frac_{key}_std"] = np.zeros_like(vals)
 
-    # Final-frame distributions (histogram panels of the ensemble figures).
-    if contacts["coord_dist_qt"] or contacts["coord_dist_ft"]:
+    # Final-frame distributions (histogram panels of the ensemble figures). Each analysis
+    # may be None when it failed for this run, so guard before dereferencing.
+    if contacts is not None and (contacts["coord_dist_qt"] or contacts["coord_dist_ft"]):
         structural["final_coord_dist_qt"] = np.asarray(
             contacts["coord_dist_qt"][-1] if contacts["coord_dist_qt"] else [], dtype=int)
         structural["final_coord_dist_ft"] = np.asarray(
             contacts["coord_dist_ft"][-1] if contacts["coord_dist_ft"] else [], dtype=int)
         structural["final_coord_dist_n_replicas"] = np.array([1])
-    for key, series in (("final_rg_values", morph["mean_rg"]),
-                        ("final_coord_qt_values", contacts["mean_coord_qt"]),
-                        ("final_coord_ft_values", contacts["mean_coord_ft"]),
-                        ("final_composition_values", comp["mean_qt_fraction"])):
-        arr = np.asarray(series, dtype=float)
+    for key, src, field in (("final_rg_values", morph, "mean_rg"),
+                            ("final_coord_qt_values", contacts, "mean_coord_qt"),
+                            ("final_coord_ft_values", contacts, "mean_coord_ft"),
+                            ("final_composition_values", comp, "mean_qt_fraction")):
+        if src is None:
+            continue
+        arr = np.asarray(src[field], dtype=float)
         if arr.size:
             structural[key] = np.array([arr[-1]])
 

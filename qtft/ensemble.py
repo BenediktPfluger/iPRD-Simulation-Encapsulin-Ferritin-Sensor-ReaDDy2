@@ -61,12 +61,8 @@ from .analysis import (
     get_binding_kinetics,
     collect_run_series,
     TIME_SERIES_METRICS,
-    get_cluster_morphology,
-    get_spatial_distribution,
-    get_contact_analysis,
-    get_cluster_composition,
+    _compute_replica_structural,
     get_size_fractions,
-    _extract_frame_data,
     _size_category_key,
 )
 
@@ -116,38 +112,6 @@ def _run_replica_worker(output_dir: str, config_path: str, equilibration_steps: 
         return {'idx': replica_idx, 'success': True, 'error': None}
     except Exception as e:
         return {'idx': replica_idx, 'success': False, 'error': str(e)}
-
-
-def _compute_replica_structural(h5_file: str, config: SimulationConfig, stride: int) -> Dict:
-    """Compute morphology/spatial/contacts/composition for one replica.
-
-    Shared by the sequential and parallel structural-analysis paths so both produce
-    identical per-replica results. Extracts frame data once and reuses it.
-
-    Returns
-    -------
-    dict with keys 'morphology', 'spatial', 'contacts', 'composition' (each a result
-    dict or None) and 'errors' (list of strings).
-    """
-    result = {'morphology': None, 'spatial': None, 'contacts': None,
-              'composition': None, 'errors': []}
-    try:
-        frame_data = _extract_frame_data(h5_file, config, stride=stride, verbose=False)
-    except Exception as e:
-        result['errors'].append(f"frame_data: {e}")
-        return result
-
-    for key, fn in (
-        ('morphology', get_cluster_morphology),
-        ('spatial', get_spatial_distribution),
-        ('contacts', get_contact_analysis),
-        ('composition', get_cluster_composition),
-    ):
-        try:
-            result[key] = fn(h5_file, config, stride=stride, frame_data=frame_data)
-        except Exception as e:
-            result['errors'].append(f"{key}: {e}")
-    return result
 
 
 def _common_time_grid(all_times: List[np.ndarray]) -> Tuple[np.ndarray, bool]:
