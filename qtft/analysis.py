@@ -518,6 +518,12 @@ def _unwrap_cluster_positions(
     periodic: bool = True,
 ) -> np.ndarray:
     """
+    .. note::
+       ``fibsem_export._unwrap`` is a deliberate duplicate of this function — that module
+       avoids importing ``analysis`` so it stays free of the module-level ``readdy`` import.
+       Both carry the same ``periodic`` flag; **keep the two in sync**.
+
+
     Unwrap cluster positions to handle periodic boundary conditions.
     
     Uses the first particle as reference and unwraps others to be
@@ -996,7 +1002,12 @@ def get_spatial_distribution(
         std_nn_dist : ndarray - std of inter-cluster NN distance per frame
         mean_intra_nn_dist : ndarray - mean intra-cluster NN distance per frame
         std_intra_nn_dist : ndarray - std of intra-cluster NN distance per frame
-        expected_nn_dist : ndarray - expected NN for random distribution per frame
+        expected_nn_dist : ndarray - expected NN for a random distribution per frame,
+            ``0.554*(V/N)^(1/3)``. Reference value only: it is **not consumed** anywhere in
+            the package (not aggregated, not saved to ensemble_structural.npz, not plotted),
+            and it assumes a *periodic* random distribution, so it is biased by wall
+            depletion when ``config.boundary == "reflective"``. Kept for ad-hoc use; treat
+            with care outside a periodic box.
         n_clusters : ndarray - number of clusters per frame
         box_size : tuple - simulation box dimensions
     """
@@ -2301,7 +2312,7 @@ def load_ensemble_data(results_dir: str) -> Tuple[Dict, Dict, Dict]:
     Example
     -------
     >>> stats, structural, config = load_ensemble_data("ensemble_results/")
-    >>> plot_ensemble_panel(stats, structural, config)
+    >>> plot_metrics_panel(stats, structural, config)
     """
     stats, npz, config, meta = _load_ensemble_files(results_dir)
     logger.info(f"✓ Loaded statistics from {meta['stats_path']}")
@@ -2490,7 +2501,7 @@ def build_single_run_plotting_data(
     """Build ``(stats, structural, config_dict)`` for ONE trajectory, in ensemble format.
 
     Produces exactly the schema ``load_ensemble_data`` returns, so every ensemble plotter —
-    in particular ``plotting.plot_ensemble_panel`` — works on a single run unchanged. There
+    in particular ``plotting.plot_metrics_panel`` — works on a single run unchanged. There
     is one "replica", so ``n_replicas = 1``, every ``*_std`` is zero and every ``*_all`` has
     shape ``(1, n)``.
 

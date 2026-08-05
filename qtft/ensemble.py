@@ -14,7 +14,7 @@ Related modules:
     - qtft.plotting: all plotting and visualization
 
 This module has NO matplotlib dependency. For plotting ensemble results,
-use qtft.plotting.plot_ensemble_panel() and related functions.
+use qtft.plotting.plot_metrics_panel() and related functions.
 
 Usage:
     import qtft
@@ -32,11 +32,12 @@ Usage:
 
     # After completion, plot results
     stats, structural, config_dict = ensemble.to_plotting_format()
-    plotting.plot_ensemble_panel(stats, structural, config_dict)
+    plotting.plot_metrics_panel(stats, structural, config_dict)
 """
 
 from __future__ import annotations
 import logging
+import traceback
 
 import json
 import os
@@ -111,7 +112,10 @@ def _run_replica_worker(output_dir: str, config_path: str, equilibration_steps: 
 
         return {'idx': replica_idx, 'success': True, 'error': None}
     except Exception as e:
-        return {'idx': replica_idx, 'success': False, 'error': str(e)}
+        # This runs in a worker process: nothing else of the failure reaches the parent,
+        # so carry the traceback in the result rather than only the message.
+        return {'idx': replica_idx, 'success': False, 'error': str(e),
+                'traceback': traceback.format_exc()}
 
 
 def _common_time_grid(all_times: List[np.ndarray]) -> Tuple[np.ndarray, bool]:
@@ -408,7 +412,7 @@ class EnsembleSimulation:
     >>> # After runs complete, analyze
     >>> ensemble.collect_results()
     >>> ensemble.compute_statistics()
-    >>> plotting.plot_ensemble_panel(*ensemble.to_plotting_format())
+    >>> plotting.plot_metrics_panel(*ensemble.to_plotting_format())
     >>> 
     >>> # Structural analysis is computed automatically by run_local()
     >>> # To recompute manually with different stride:
@@ -619,7 +623,8 @@ class EnsembleSimulation:
                 if result['success']:
                     logger.info(f"  Completed: {completed}/{self.n_replicas} (replica {result['idx']})")
                 else:
-                    logger.info(f"  FAILED: {completed}/{self.n_replicas} (replica {result['idx']}): {result['error']}")
+                    logger.error(f"  FAILED: {completed}/{self.n_replicas} (replica {result['idx']}): {result['error']}")
+                    logger.debug(result.get('traceback', ''))
     
     def _run_single_replica(self, replica_idx: int, equilibration_steps: int):
         """Run a single replica simulation."""
@@ -925,7 +930,7 @@ echo "Analysis completed at $(date)"
                     self.replica_data['reaction_counts'].append(entries['reaction_counts'])
                     self.replica_data['available_replicas'].append(i)
                 except Exception as e:
-                    logger.error(f"    Error loading phased replica {i}: {e}")
+                    logger.error(f"    Error loading phased replica {i}: {e}", exc_info=True)
                     missing_replicas.append(i)
                 continue
 
@@ -951,7 +956,7 @@ echo "Analysis completed at $(date)"
                 self.replica_data['available_replicas'].append(i)
                 
             except Exception as e:
-                logger.error(f"    Error loading replica {i}: {e}")
+                logger.error(f"    Error loading replica {i}: {e}", exc_info=True)
                 missing_replicas.append(i)
         
         n_available = len(self.replica_data['available_replicas'])
@@ -1359,7 +1364,7 @@ echo "Analysis completed at $(date)"
                     sf = get_size_fractions(config.output_file, config)
                 size_fraction_data.append(sf)
             except Exception as e:
-                logger.error(f"    ✗ Size fractions failed for replica {i}: {e}")
+                logger.error(f"    ✗ Size fractions failed for replica {i}: {e}", exc_info=True)
                 size_fraction_data.append(None)
         
         valid_sf = [d for d in size_fraction_data if d is not None]
@@ -1561,11 +1566,10 @@ echo "Analysis completed at $(date)"
         }
         
         # Add time series statistics
-        time_series_keys = [
-            'bonds', 'energy', 'pressure', 'n_clusters', 'largest_cluster', 'fraction_bound',
-            'avg_cluster', 'cumulative_reactions',
-            'qt_count', 'ft_count', 'qtc_count', 'ftc_count', 'total_count'
-        ]
+        # Derived from the metric table, not hand-listed: a metric added to
+        # TIME_SERIES_METRICS is computed by compute_statistics, so it must also be saved.
+        # The previous hard-coded list could silently omit one.
+        time_series_keys = [name for name, _source, _getter in TIME_SERIES_METRICS]
         
         for key in time_series_keys:
             mean_key = f'{key}_mean'

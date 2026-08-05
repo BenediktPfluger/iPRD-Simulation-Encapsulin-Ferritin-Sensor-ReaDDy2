@@ -5,7 +5,7 @@ All matplotlib figures for the ReaDDy2 Qt-Ft agglomeration simulations. Every ru
 single run, ensemble, cross-ensemble comparison — produces the same three figures, built
 from the same ``(stats, structural, config)`` triple:
 
-    plot_ensemble_panel        12-metric overview
+    plot_metrics_panel         12-metric overview (single run or ensemble)
     plot_kinetics              bonds / fraction bound / avg cluster size (phase-aware)
     plot_large_cluster_count   number of clusters above a size threshold
 
@@ -22,7 +22,7 @@ Usage:
 
     # one triple per target; a single run uses build_single_run_plotting_data
     stats, structural, config = analysis.load_ensemble_data(ensemble_dir)
-    plotting.plot_ensemble_panel(stats, structural, config, save_path_base="Plots/panel")
+    plotting.plot_metrics_panel(stats, structural, config, save_path_base="Plots/panel")
 """
 
 from __future__ import annotations
@@ -649,7 +649,7 @@ def plot_phased_kinetics(
 # THESIS PANELS (composite multi-subplot figures; save paired SVG + PNG)
 # =============================================================================
 
-def plot_ensemble_panel(
+def plot_metrics_panel(
     stats: Dict,
     structural: Dict,
     config: Dict,
@@ -659,7 +659,11 @@ def plot_ensemble_panel(
     figsize: Tuple[float, float] = (18, 18),
     save_path_base: Optional[str] = None,
 ) -> plt.Figure:
-    """Curated single-ensemble thesis panel (4x3 grid); optionally saves {base}.svg + .png.
+    """Curated 12-metric thesis panel (4x3 grid); optionally saves {base}.svg + .png.
+
+    Takes the ``(stats, structural, config)`` triple, which a single run produces via
+    ``analysis.build_single_run_plotting_data`` and an ensemble via
+    ``EnsembleSimulation.to_plotting_format()`` — hence "metrics", not "ensemble".
 
     Layout:
         Row 1: Energy | Pressure | Number of Bonds
@@ -919,3 +923,7 @@ def plot_comparison_panel(
             print(f"✓ Saved panel to {path}")
 
     return fig
+
+
+# Renamed in the P3 cleanup: a single run calls this too, so "ensemble" was misleading.
+plot_ensemble_panel = plot_metrics_panel

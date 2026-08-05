@@ -159,7 +159,7 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `qtft.engine` | Build + run: `create_simulation`, `place_particles`, `run_simulation`, `equilibrate_system`, and the one-shot `run_one`. |
 | `qtft.ensemble` | `EnsembleSimulation` class — multi-replica orchestration, local/parallel runs, SLURM script generation, result collection, statistics, save/load. |
 | `qtft.analysis` | Matplotlib-free trajectory analysis: cluster stats, bond counts, binding kinetics, morphology (Rg), spatial distribution, contacts, composition, size fractions. Also `convert_h5_to_xyz` (OVITO), `load_ensemble_data`, and numeric results tables (`build_final_state_table`, `save_table_files`). |
-| `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_ensemble_panel` / `plot_comparison_panel` (each writes paired SVG + PNG via `save_path_base`). |
+| `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_metrics_panel` / `plot_comparison_panel` (each writes paired SVG + PNG via `save_path_base`). |
 | `qtft.comparison` | Cross-ensemble comparison helpers (`compare_ensembles`, `save/load_comparison_data`, `build_comparison_table`, …). |
 | `qtft.fibsem_export` | Export the **final frame** to the FIB-SEM segmentation schema for experiment comparison: encapsulin (Qt/QtC) centroids with ground-truth cluster IDs. Read-only — it consumes a finished trajectory and never runs a simulation. See **[§13](#13-fib-sem-comparison-export)**. |
 | `scripts/analyze_ensemble.py` | CLI to (re)analyze an ensemble directory in parallel; `compare` subcommand. |
@@ -237,7 +237,7 @@ trajectory = sim.run_one(config, skip_equilibration=True)
 analysis.print_analysis_summary(config.output_file, config)
 # One triple drives every figure (see §9); a single run builds its own:
 stats, structural, cfg = analysis.build_single_run_plotting_data(config.output_file, config)
-plotting.plot_ensemble_panel(stats, structural, cfg, save_path_base="Plots/panel")
+plotting.plot_metrics_panel(stats, structural, cfg, save_path_base="Plots/panel")
 plotting.plot_kinetics([{"label": "run",
                          "data": analysis.build_kinetics_data_single(config.output_file, config)}],
                        save_path_base="Plots/kinetics")
@@ -337,7 +337,7 @@ ensemble.run_local(parallel=True, n_workers=10, overwrite=True, equilibration_st
 
 # Plot
 stats, structural, cfg = ensemble.to_plotting_format()
-plotting.plot_ensemble_panel(stats, structural, cfg, show_individual=True,
+plotting.plot_metrics_panel(stats, structural, cfg, show_individual=True,
                              save_path_base="Plots/panel")
 plotting.plot_kinetics([{"label": "ensemble",
                          "data": analysis.build_kinetics_data_ensemble(stats, cfg)}],
@@ -475,7 +475,7 @@ Every figure is written as paired **SVG + PNG**. `SHOW_SPREAD` overlays per-repl
 - **`panel`** — the 12-metric overview: energy, pressure, bonds; particle counts, topologies,
   average cluster size; largest cluster, particles by size category, mean radius of gyration;
   mean cluster composition, coordination number, coordination distribution.
-  `plot_ensemble_panel(stats, structural, config)` for one target,
+  `plot_metrics_panel(stats, structural, config)` for one target,
   `plot_comparison_panel(comparison)` across several.
 - **`kinetics`** — `plot_kinetics(series, ...)`: bonds, fraction bound (Qt/Ft), and average
   cluster size on one continuous time axis, with dashed phase-boundary markers for an

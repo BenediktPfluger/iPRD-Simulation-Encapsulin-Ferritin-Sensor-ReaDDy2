@@ -2,13 +2,17 @@
 """
 Standing consistency check for the `qtft` package.
 
-Reports three classes of rot that repeatedly went unnoticed during development:
+Reports four classes of rot that repeatedly went unnoticed during development:
 
   1. **Dead functions** — defined but never referenced from the package, `scripts/`, or any
      notebook code cell.
   2. **Unused imports** — a name imported by a module and never used in it.
   3. **Documented-but-missing names** — a ``qtft`` symbol written in backticks in the README
      or in a docstring that no longer exists, so the docs promise an API the code lacks.
+  4. **Unserialized config fields** — a dataclass field in ``qtft/config.py`` that ``to_dict``
+     never writes or ``from_dict`` never restores. Serialization there is hand-enumerated, so
+     a new field is silently dropped from every saved config until someone edits both methods
+     as well; adding ``boundary`` touched four sites with nothing checking they agreed.
 
 Why AST rather than grep
 ------------------------
@@ -111,6 +115,49 @@ def _exported(tree: ast.AST) -> set:
     return out
 
 
+def _config_field_coverage():
+    """Dataclass fields in ``qtft/config.py`` that ``to_dict``/``from_dict`` do not cover.
+
+    Returns ``[(class_name, field, "to_dict" | "from_dict"), …]``.
+
+    A field is counted as *serialized* when ``to_dict`` reads it as an attribute
+    (``self.topology.koff`` → ``Attribute(attr='koff')``) and as *restored* when ``from_dict``
+    passes it as a constructor keyword (``koff=g(...)``). Name-only matching means a field
+    shared by two dataclasses (``name``) is satisfied by either — the check can miss, but it
+    cannot cry wolf, which is the property that keeps the report at zero and therefore read.
+
+    UPPERCASE fields are skipped: those are fixed physical constants declared with
+    ``field(repr=False)`` (``WCA_CUTOFF_FACTOR`` = 2^(1/6)), not tunable parameters, and are
+    deliberately absent from the saved format.
+    """
+    tree = ast.parse(io.open(os.path.join(REPO, "qtft", "config.py"), encoding="utf-8").read())
+    serialized, restored, classes = set(), set(), []
+
+    for cls in tree.body:
+        if not (isinstance(cls, ast.ClassDef) and any(
+                getattr(d, "id", getattr(d, "attr", None)) == "dataclass"
+                for d in cls.decorator_list)):
+            continue
+        fields = [n.target.id for n in cls.body
+                  if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+                  and "ClassVar" not in ast.dump(n.annotation)
+                  and not n.target.id.isupper()]
+        classes.append((cls.name, fields))
+        for m in cls.body:
+            if not isinstance(m, ast.FunctionDef):
+                continue
+            if m.name == "to_dict":
+                serialized |= {n.attr for n in ast.walk(m) if isinstance(n, ast.Attribute)}
+            elif m.name == "from_dict":
+                restored |= {k.arg for n in ast.walk(m) if isinstance(n, ast.Call)
+                             for k in n.keywords if k.arg}
+
+    return [(name, f, where)
+            for name, fields in classes for f in fields
+            for where, covered in (("to_dict", serialized), ("from_dict", restored))
+            if f not in covered]
+
+
 def _parse(label, src):
     try:
         return ast.parse(src)
@@ -180,7 +227,7 @@ def scan():
         for name in re.findall(r"`([A-Za-z_][A-Za-z0-9_]*)`", text):
             if name.startswith(known_prefixes) and name not in symbols:
                 missing.add((label, name))
-    return dead, unused, sorted(missing)
+    return dead, unused, sorted(missing), _config_field_coverage()
 
 
 def main():
@@ -190,7 +237,7 @@ def main():
     p.add_argument("--strict", action="store_true", help="exit 1 if anything is found")
     args = p.parse_args()
 
-    dead, unused, missing = scan()
+    dead, unused, missing, uncovered = scan()
 
     if not args.quiet:
         print("=" * 72)
@@ -215,7 +262,13 @@ def main():
     if not missing:
         print("  none")
 
-    total = len(dead) + len(unused) + len(missing)
+    print(f"\nUnserialized config fields ({len(uncovered)}) — declared, not round-tripped:")
+    for cls, field_name, where in uncovered:
+        print(f"  qtft/config.py  {cls}.{field_name:<28} missing from {where}()")
+    if not uncovered:
+        print("  none")
+
+    total = len(dead) + len(unused) + len(missing) + len(uncovered)
     print(f"\n{'=' * 72}\n{total} item(s) found.")
     if args.strict and total:
         return 1

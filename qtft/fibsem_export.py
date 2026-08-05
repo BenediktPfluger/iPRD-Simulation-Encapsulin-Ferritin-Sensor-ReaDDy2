@@ -39,7 +39,11 @@ FREE_TYPE = "Qt"         # free (unbound) encapsulin
 def _unwrap(positions: np.ndarray, box_size, periodic: bool = True) -> np.ndarray:
     """Unwrap one cluster's positions across periodic boundaries.
 
-    Mirrors ``qtft.analysis._unwrap_cluster_positions``: anchor on the first particle, then
+    Deliberate duplicate of ``qtft.analysis._unwrap_cluster_positions`` — this module avoids
+    importing ``analysis`` so it stays free of that module's top-level ``readdy`` import.
+    **Keep the two in sync**; both carry the same ``periodic`` flag.
+
+    Mirrors that function: anchor on the first particle, then
     add particles one at a time, each shifted by the minimum-image convention relative to the
     running centre of mass. Returns positions made spatially contiguous (they may legitimately
     lie outside the primary box).
