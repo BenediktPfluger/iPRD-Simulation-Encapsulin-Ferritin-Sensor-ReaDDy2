@@ -439,6 +439,97 @@ def _extract_frame_data(
     }
 
 
+def _read_position_frames(
+    h5_file: str,
+    config: SimulationConfig,
+    last_n: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Read positions and type names for the *last* ``last_n`` recorded frames.
+
+    A positions-only counterpart to ``_extract_frame_data`` for analyses that need
+    neither topology membership nor edges. ``_extract_frame_data`` always decodes the
+    whole trajectory (1.4 GB on a 25,500-particle run, far more on a stitched phased
+    file); this reads just the requested frame range through ``Trajectory.to_numpy``,
+    which is a bounded, near-instant slice.
+
+    Positions always come from the **recorded trajectory** (``record_trajectory`` in
+    ``qtft/engine.py`` is unconditional), never from the optional particles observable.
+    When both exist the trajectory is usually the finer of the two, so the frames
+    returned here can span a shorter time window than ``_extract_frame_data`` would
+    return for the same ``last_n``.
+
+    Parameters
+    ----------
+    h5_file : str
+        Path to trajectory HDF5 file.
+    config : SimulationConfig
+        Configuration (unused for the read itself; kept for signature symmetry).
+    last_n : int, optional
+        Number of trailing frames to read. ``None`` or <= 0 reads every frame.
+
+    Returns
+    -------
+    dict with the subset of ``_extract_frame_data`` keys that positional analyses use:
+        times : ndarray - simulation step numbers (NOT ns; convert via _steps_to_us)
+        n_frames : int - number of frames read
+        positions : list of ndarray - particle positions per frame (n_particles, 3)
+        types : list of ndarray - particle type names per frame
+    """
+    # Step numbers and the frame count come from the small index datasets, so the
+    # frame range can be chosen without decoding any particle records.
+    with h5py.File(h5_file, "r") as handle:
+        if "readdy/trajectory" not in handle:
+            raise ValueError(f"No frames found in {h5_file}")
+        group = handle["readdy/trajectory"]
+        total = int(group["limits"].shape[0]) if "limits" in group else 0
+        # The recorded step of every frame. Read from the file rather than derived from
+        # config.record_stride, so a config that disagrees with the file cannot mislabel
+        # the time axis.
+        all_times = np.asarray(group["time"][:]) if "time" in group else np.arange(total)
+
+    if total == 0:
+        raise ValueError(f"No frames found in {h5_file}")
+
+    n_use = total if (last_n is None or last_n <= 0) else min(int(last_n), total)
+    start = total - n_use
+
+    trajectory = readdy.Trajectory(h5_file)
+    # to_numpy() rejects None bounds, so both ends are always passed explicitly.
+    # `stop` is exclusive.
+    n_per_frame, positions, type_ids, _ids = trajectory.to_numpy(start=start, stop=total)
+
+    # Vectorized id -> name lookup. dtype=object so the "type_<id>" fallback for an
+    # unknown id is not truncated -- callers compare these names as strings.
+    id_to_name = {int(v): k for k, v in trajectory.particle_types.items()}
+    max_id = max(id_to_name) if id_to_name else -1
+    lookup = np.array(
+        [id_to_name.get(i, f"type_{i}") for i in range(max_id + 1)], dtype=object
+    )
+
+    positions_list: List[np.ndarray] = []
+    types_list: List[np.ndarray] = []
+    for i in range(positions.shape[0]):
+        # to_numpy pads every frame to the largest one; slice back to the real count.
+        n_i = int(n_per_frame[i])
+        positions_list.append(np.asarray(positions[i, :n_i], dtype=float))
+        ids_i = np.asarray(type_ids[i, :n_i], dtype=np.int64)
+        if ids_i.size and max_id >= 0:
+            known = ids_i <= max_id
+            names = np.empty(ids_i.size, dtype=object)
+            names[known] = lookup[ids_i[known]]
+            names[~known] = [f"type_{t}" for t in ids_i[~known]]
+        else:
+            names = np.array([], dtype=object)
+        types_list.append(names)
+
+    return {
+        "times": np.asarray(all_times[start:total]),
+        "n_frames": len(positions_list),
+        "positions": positions_list,
+        "types": types_list,
+    }
+
 
 def _extract_topology_info(
     frame_idx: int,
@@ -1458,11 +1549,165 @@ def print_analysis_summary(h5_file: str, config: Optional[SimulationConfig] = No
     print("=" * 60 + "\n")
 
 
+#: Working-set cost of one pair in the blocked overlap kernel: the squared-distance
+#: accumulator, the per-axis displacement, and the two temporaries the minimum-image
+#: step creates -- all float64. Used to turn a byte budget into a row count.
+_OVERLAP_BYTES_PER_PAIR = 48
+
+#: Default working-set budget for the blocked overlap kernel (bytes).
+_OVERLAP_MAX_BYTES = 256 * 1024 ** 2
+
+
+class _OverlapAccumulator:
+    """
+    Running pair-overlap statistics for one species family, in bounded memory.
+
+    Every field ``get_overlap_statistics`` reports is a scalar reduction except the
+    95th percentile, so nothing is retained but the depths of the pairs that actually
+    overlap. That list is bounded by the number of *overlapping* pairs, not by the
+    number of pairs -- for a sane parameter set it is a vanishing fraction of N^2.
+    Do not "simplify" this back into pooling every distance: on a 25,500-particle run
+    that is 12 GB of distances to produce ten numbers.
+    """
+
+    def __init__(self, contact: float):
+        self.contact = float(contact)
+        self.n_pairs = 0
+        self.n_hit = 0
+        self.sum_ov = 0.0          # summed depth over ALL pairs (non-overlapping = 0)
+        self.min_d = float("inf")
+        self.max_ov = 0.0
+        self.hit_depths: List[np.ndarray] = []
+
+    def update(self, dist: np.ndarray) -> None:
+        """Fold one chunk of pair distances into the running statistics."""
+        if dist.size == 0:
+            return
+        self.n_pairs += int(dist.size)
+        d_min = float(dist.min())
+        if d_min < self.min_d:
+            self.min_d = d_min
+        ov = self.contact - dist
+        hit = ov > 0.0
+        n_hit = int(np.count_nonzero(hit))
+        if n_hit:
+            ov_hit = ov[hit]
+            self.n_hit += n_hit
+            self.sum_ov += float(ov_hit.sum())   # non-overlapping pairs contribute 0
+            self.max_ov = max(self.max_ov, float(ov_hit.max()))
+            self.hit_depths.append(ov_hit)
+
+    def result(self) -> Dict[str, Any]:
+        """The per-family result dict, with the same keys and sentinels as before."""
+        contact = self.contact
+        if self.n_pairs == 0:
+            # "Too few particles": min = nan is the sentinel print_overlap_summary and
+            # scripts/calibrate_soft_k.py branch on.
+            return {
+                "contact": contact, "min": float("nan"), "n_pairs": 0, "n_overlapping": 0,
+                "frac_overlapping": float("nan"), "mean_overlap_nm": float("nan"),
+                "mean_overlap_frac": float("nan"), "mean_overlap_all_frac": float("nan"),
+                "p95_overlap_frac": float("nan"), "max_overlap_frac": float("nan"),
+            }
+        if self.n_hit:
+            depths = np.concatenate(self.hit_depths)
+            mean_nm = float(depths.mean())
+            p95 = float(np.percentile(depths, 95))
+            mx = float(self.max_ov)
+        else:
+            mean_nm = p95 = mx = 0.0
+        mean_all_nm = self.sum_ov / self.n_pairs   # zeros included -> no selection bias
+        return {
+            "contact": contact,
+            "min": float(self.min_d),
+            "n_pairs": int(self.n_pairs),
+            "n_overlapping": int(self.n_hit),
+            "frac_overlapping": self.n_hit / self.n_pairs,
+            "mean_overlap_nm": mean_nm,
+            "mean_overlap_frac": mean_nm / contact if contact > 0 else float("nan"),
+            "mean_overlap_all_frac": mean_all_nm / contact if contact > 0 else float("nan"),
+            "p95_overlap_frac": p95 / contact if contact > 0 else float("nan"),
+            "max_overlap_frac": mx / contact if contact > 0 else float("nan"),
+        }
+
+
+def _accumulate_pair_block(
+    accumulator: "_OverlapAccumulator",
+    a_pos: np.ndarray,
+    b_pos: np.ndarray,
+    box: np.ndarray,
+    periodic: bool,
+    same: bool,
+    max_bytes: int,
+) -> None:
+    """
+    Stream the minimum-image distances between two position sets into ``accumulator``.
+
+    ``same`` restricts to the strict upper triangle (unique pairs, no self-pairs).
+
+    Memory is bounded by ``max_bytes``, not by the system size: rows of ``a_pos`` are
+    processed in chunks sized so the working arrays fit the budget, and the squared
+    distance is accumulated one axis at a time so no (rows, M, 3) array is ever built.
+    The naive ``pos[:, None, :] - pos[None, :, :]`` form needs 14.5 GiB at N = 25,500
+    before the minimum-image temporaries triple it.
+    """
+    n_a, n_b = a_pos.shape[0], b_pos.shape[0]
+    if n_a == 0 or n_b == 0 or (same and n_a < 2):
+        return
+
+    rows = max(1, int(max_bytes // (_OVERLAP_BYTES_PER_PAIR * max(n_b, 1))))
+    for i in range(0, n_a, rows):
+        stop = min(i + rows, n_a)
+        # Squared distance, accumulated per axis: same summation order as
+        # np.linalg.norm(delta, axis=-1), which is sqrt(add.reduce(x * x, axis)).
+        dd = np.zeros((stop - i, n_b), dtype=float)
+        for k in range(3):
+            dk = a_pos[i:stop, k][:, None] - b_pos[None, :, k]
+            if periodic:
+                dk -= box[k] * np.round(dk / box[k])   # minimum image, per axis
+            dd += dk * dk
+        dist = np.sqrt(dd, out=dd)
+        if same:
+            # Strict upper triangle in global row/column indices.
+            keep = np.arange(n_b)[None, :] > np.arange(i, stop)[:, None]
+            dist = dist[keep]
+        accumulator.update(dist.ravel())
+
+
+def _accumulate_overlap_frame(
+    acc: Dict[str, "_OverlapAccumulator"],
+    pos: np.ndarray,
+    types: np.ndarray,
+    box: np.ndarray,
+    periodic: bool,
+    qt_names: set,
+    ft_names: set,
+    max_bytes: int = _OVERLAP_MAX_BYTES,
+) -> None:
+    """
+    Fold one frame's Qt-Qt / Qt-Ft / Ft-Ft pair distances into the accumulators.
+
+    The three families are built directly from the two species position sets, so no
+    N x N matrix is formed and then sliced.
+    """
+    qt_pos = pos[np.isin(types, list(qt_names))]
+    ft_pos = pos[np.isin(types, list(ft_names))]
+    for label, a_pos, b_pos, same in (
+        ("Qt-Qt", qt_pos, qt_pos, True),
+        ("Qt-Ft", qt_pos, ft_pos, False),
+        ("Ft-Ft", ft_pos, ft_pos, True),
+    ):
+        _accumulate_pair_block(
+            acc[label], a_pos, b_pos, box, periodic, same, max_bytes
+        )
+
+
 def get_overlap_statistics(
     h5_file: str,
     config: SimulationConfig,
     n_frames: int = 5,
     trajectory: Optional[readdy.Trajectory] = None,
+    max_bytes: int = _OVERLAP_MAX_BYTES,
 ) -> Dict[str, Any]:
     """
     Distribution of pair interpenetration, pooled over the last ``n_frames`` frames.
@@ -1477,6 +1722,17 @@ def get_overlap_statistics(
     the overlap of a pair at centre-to-centre distance d is ``max(contact - d, 0)``,
     with ``contact = r_i + r_j``. Distances use the minimum-image convention.
 
+    Positions come from the **recorded trajectory** (``_read_position_frames``), never
+    from the optional particles observable. On a run configured with
+    ``particles_observable_stride`` coarser than ``record_stride`` the pooled frames
+    therefore span a shorter, more correlated window than they used to -- e.g. with
+    strides 1000 and 100, the last 5 frames cover 400 steps instead of 4000. The
+    numbers are recomputed on demand and never persisted, so this only affects what
+    the diagnostic prints.
+
+    Pair distances are streamed in blocks rather than materialized: the memory this
+    holds is set by ``max_bytes``, not by the particle count.
+
     Parameters
     ----------
     h5_file : str
@@ -1488,6 +1744,10 @@ def get_overlap_statistics(
         more frames than exist, use the whole trajectory.
     trajectory : readdy.Trajectory, optional
         Unused placeholder for API symmetry with other analysis functions.
+    max_bytes : int
+        Working-set budget for the pair kernel (default: 256 MiB). Peak memory stays
+        near this at any system size; a smaller value trades speed for footprint and
+        does not change the result.
 
     Returns
     -------
@@ -1516,13 +1776,9 @@ def get_overlap_statistics(
     flat (or rise) while total interpenetration falls. The unconditional mean
     (= mean_overlap_frac x frac_overlapping) has no such bias.
     """
-    data = _extract_frame_data(h5_file, config, verbose=False)
+    data = _read_position_frames(h5_file, config, last_n=n_frames)
     if data["n_frames"] == 0:
         raise ValueError(f"No frames found in {h5_file}")
-
-    total = data["n_frames"]
-    n_use = total if (n_frames is None or n_frames <= 0) else min(int(n_frames), total)
-    frame_idx = list(range(total - n_use, total))
 
     box = np.asarray(config.box_size, dtype=float)
     qt_names = {config.qt.name, config.qt.cluster_name}
@@ -1530,78 +1786,23 @@ def get_overlap_statistics(
     rq, rf = config.qt.radius, config.ft.radius
     contacts = {"Qt-Qt": 2.0 * rq, "Qt-Ft": rq + rf, "Ft-Ft": 2.0 * rf}
 
-    # Pool raw distances per family across the selected frames.
-    pooled: Dict[str, List[np.ndarray]] = {k: [] for k in contacts}
+    acc = {label: _OverlapAccumulator(contact) for label, contact in contacts.items()}
     steps: List[int] = []
 
-    for fi in frame_idx:
+    for fi in range(data["n_frames"]):
         pos = np.asarray(data["positions"][fi], dtype=float)
         types = np.asarray(data["types"][fi])
         if pos.size == 0:
             continue
-        qt_mask = np.isin(types, list(qt_names))
-        ft_mask = np.isin(types, list(ft_names))
-
-        # Full minimum-image distance matrix for the frame (N is a few hundred).
-        delta = pos[:, None, :] - pos[None, :, :]
-        delta = _min_image(delta, box, periodic=config.is_periodic)
-        dist = np.linalg.norm(delta, axis=-1)
-
-        for label, ma, mb, same in (
-            ("Qt-Qt", qt_mask, qt_mask, True),
-            ("Qt-Ft", qt_mask, ft_mask, False),
-            ("Ft-Ft", ft_mask, ft_mask, True),
-        ):
-            ia = np.flatnonzero(ma)
-            ib = np.flatnonzero(mb)
-            if ia.size == 0 or ib.size == 0:
-                continue
-            block = dist[np.ix_(ia, ib)]
-            if same:
-                if ia.size < 2:
-                    continue
-                iu = np.triu_indices(ia.size, k=1)   # unique pairs, no self-pairs
-                pooled[label].append(block[iu])
-            else:
-                pooled[label].append(block.ravel())
-
+        _accumulate_overlap_frame(
+            acc, pos, types, box,
+            periodic=config.is_periodic,
+            qt_names=qt_names, ft_names=ft_names,
+            max_bytes=max_bytes,
+        )
         steps.append(int(data["times"][fi]) if len(data["times"]) else 0)
 
-    pairs: Dict[str, Any] = {}
-    for label, contact in contacts.items():
-        chunks = pooled[label]
-        if not chunks:
-            pairs[label] = {
-                "contact": contact, "min": float("nan"), "n_pairs": 0, "n_overlapping": 0,
-                "frac_overlapping": float("nan"), "mean_overlap_nm": float("nan"),
-                "mean_overlap_frac": float("nan"), "p95_overlap_frac": float("nan"),
-                "max_overlap_frac": float("nan"),
-            }
-            continue
-        d = np.concatenate(chunks)
-        ov = np.clip(contact - d, 0.0, None)
-        hit = ov > 0.0
-        n_hit = int(hit.sum())
-        if n_hit:
-            ov_hit = ov[hit]
-            mean_nm = float(ov_hit.mean())
-            p95 = float(np.percentile(ov_hit, 95))
-            mx = float(ov_hit.max())
-        else:
-            mean_nm = p95 = mx = 0.0
-        mean_all_nm = float(ov.mean())        # zeros included -> unbiased by selection
-        pairs[label] = {
-            "contact": contact,
-            "min": float(d.min()),
-            "n_pairs": int(d.size),
-            "n_overlapping": n_hit,
-            "frac_overlapping": n_hit / d.size,
-            "mean_overlap_nm": mean_nm,
-            "mean_overlap_frac": mean_nm / contact if contact > 0 else float("nan"),
-            "mean_overlap_all_frac": mean_all_nm / contact if contact > 0 else float("nan"),
-            "p95_overlap_frac": p95 / contact if contact > 0 else float("nan"),
-            "max_overlap_frac": mx / contact if contact > 0 else float("nan"),
-        }
+    pairs = {label: acc[label].result() for label in contacts}
 
     last_step = steps[-1] if steps else 0
     return {
@@ -1617,6 +1818,7 @@ def print_overlap_summary(
     config: SimulationConfig,
     n_frames: int = 5,
     trajectory: Optional[readdy.Trajectory] = None,
+    max_bytes: int = _OVERLAP_MAX_BYTES,
 ) -> Dict[str, Any]:
     """
     Print the interpenetration table: closest approach, deepest overlap, and mean overlap.
@@ -1637,8 +1839,11 @@ def print_overlap_summary(
         frame only.
     trajectory : readdy.Trajectory, optional
         Unused placeholder for API symmetry with other analysis functions.
+    max_bytes : int
+        Working-set budget for the pair kernel (default: 256 MiB), passed through.
     """
-    res = get_overlap_statistics(h5_file, config, n_frames=n_frames, trajectory=trajectory)
+    res = get_overlap_statistics(h5_file, config, n_frames=n_frames,
+                                 trajectory=trajectory, max_bytes=max_bytes)
     n_used = res["n_frames_used"]
     print("=" * 60)
     print(f"MINIMUM & MEAN INTERPENETRATION "

@@ -431,6 +431,15 @@ This (re)writes `ensemble_statistics.json` and `ensemble_structural.npz`.
   table (the notebooks call this after every run). When comparing parameter sets, rank on
   the mean over *all* pairs (`mean_overlap_all_frac`) — a minimum is an extreme-value
   statistic, and the mean over only the overlapping pairs is selection-biased.
+  Pair distances are **streamed in blocks**, so peak memory is set by the `max_bytes`
+  argument (default 256 MiB) rather than by the particle count — a 25,500-particle frame
+  runs in ~330 MB, where materializing the full N×N distance matrix needed 14.5 GiB.
+  Lowering `max_bytes` trades speed for footprint and does not change the numbers.
+  Positions come from the **recorded trajectory tail** (`record_stride`), not from the
+  optional particles observable. On runs where `particles_observable_stride` is coarser
+  than `record_stride` this narrows the pooled window — with strides 1000 and 100, the
+  last 5 frames span 400 steps instead of 4000 — so the printed values shift slightly
+  versus older output. Nothing persisted changes: these numbers are always recomputed.
 
 **Output-file inventory:**
 
