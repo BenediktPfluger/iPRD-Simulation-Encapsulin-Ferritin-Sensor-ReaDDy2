@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 import matplotlib.pyplot as plt
@@ -121,7 +122,6 @@ def _plot_coord_distribution(
     ax.set_xlabel("Coordination Number", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
     ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
 
 
 # =============================================================================
@@ -259,7 +259,7 @@ def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, tit
                            show_bands: bool, divide_by_N: bool = False) -> bool:
     """Overlay a basic-stats time series (``ens['stats']``) per ensemble on ``ax``.
 
-    Draws lines/bands + labels/title/grid; the caller places the legend (so standalone and
+    Draws lines/bands + labels/title; the caller places the legend (so standalone and
     panel can differ). When ``divide_by_N`` is True, mean/std are divided by ``_total_particles``.
     Returns True if any data was drawn.
     """
@@ -298,7 +298,6 @@ def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, tit
     ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
     ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
     ax.tick_params(labelsize=FONTSIZE_TICK)
     return has_data
 
@@ -344,7 +343,6 @@ def _comparison_struct_ts(ax, comparison: dict, time_key: str, mean_key: str, st
     ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
     ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
     ax.tick_params(labelsize=FONTSIZE_TICK)
     if has_data:
         ax.legend(loc=legend_loc, fontsize=FONTSIZE_LEGEND)
@@ -396,7 +394,6 @@ def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool,
     ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Mean Coordination", fontsize=FONTSIZE_LABEL)
     ax.set_title("Coordination Number", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
     ax.tick_params(labelsize=FONTSIZE_TICK)
     if has_data:
         ens_handles, ens_labels = ax.get_legend_handles_labels()
@@ -495,7 +492,6 @@ def plot_large_cluster_count(
     ax.set_ylabel("Number of clusters", fontsize=FONTSIZE_LABEL)
     ax.set_title(title if title is not None else f"Clusters with size ≥ {min_size}",
                  fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
     plt.tight_layout()
 
     if save_path:
@@ -596,8 +592,6 @@ def plot_kinetics(
     axes[2].set_ylabel("Avg cluster size")
     axes[2].set_xlabel(f"Time ({time_unit})")
 
-    for ax in axes:
-        ax.grid(True, alpha=0.3)
     _mark_phase_boundaries(axes[0], bnd, starts, names)
     _mark_phase_boundaries(axes[1], bnd)
     _mark_phase_boundaries(axes[2], bnd)
@@ -696,7 +690,6 @@ def plot_metrics_panel(
         ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
         ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
         ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-        ax.grid(True, alpha=0.3)
 
     # Row 1
     simple_band(axes[0, 0], 'energy_mean', 'energy_std', 'tab:red',
@@ -723,13 +716,12 @@ def plot_metrics_panel(
                             color=particle_colors[ptype], alpha=0.2)
             has_particle_data = True
     if has_particle_data:
-        ax.legend(loc='upper right', fontsize=FONTSIZE_LEGEND)
+        ax.legend(loc='center right', fontsize=FONTSIZE_LEGEND)
     else:
         _ensemble_show_no_data(ax)
     ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Count", fontsize=FONTSIZE_LABEL)
     ax.set_title("Particle Counts", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
 
     simple_band(axes[1, 1], 'n_clusters_mean', 'n_clusters_std', 'tab:purple',
                 "Number of Individual Topologies", "Number of Individual Topologies",
@@ -764,7 +756,6 @@ def plot_metrics_panel(
     ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Fraction", fontsize=FONTSIZE_LABEL)
     ax.set_title("Particles by Size Category", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3, axis='y')
 
     ax = axes[2, 2]
     times, mean, std, all_data, time_label = _ensemble_struct_ts(
@@ -778,7 +769,6 @@ def plot_metrics_panel(
     ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Mean Rg (nm)", fontsize=FONTSIZE_LABEL)
     ax.set_title("Mean Radius of Gyration", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
 
     # Row 4: mean composition, coordination (Qt+Ft fused), final coordination distribution
     ax = axes[3, 0]
@@ -796,7 +786,6 @@ def plot_metrics_panel(
     ax.set_ylabel("Mean Qt Fraction", fontsize=FONTSIZE_LABEL)
     ax.set_ylim([0, 1])
     ax.set_title("Mean Cluster Composition", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
 
     ax = axes[3, 1]
     t_qt, m_qt, s_qt, all_qt, time_label = _ensemble_struct_ts(
@@ -821,7 +810,6 @@ def plot_metrics_panel(
     ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
     ax.set_ylabel("Mean Coordination", fontsize=FONTSIZE_LABEL)
     ax.set_title("Coordination Number", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.grid(True, alpha=0.3)
 
     # Final-frame per-particle coordination, pooled over replicas and rescaled to a
     # per-replica count so the y axis is comparable with the single-run figure.
@@ -853,6 +841,128 @@ def plot_metrics_panel(
             print(f"✓ Saved panel to {path}")
 
     return fig
+
+
+def plot_metrics_separately(
+    stats: Dict,
+    structural: Optional[Dict],
+    config: Dict,
+    *,
+    show_individual: bool = False,
+    individual_alpha: float = 0.3,
+    figsize: Tuple[float, float] = (7, 5),
+    save_dir: Optional[str] = None,
+    suffix: str = "",
+) -> Dict[str, plt.Figure]:
+    """Four standalone, **title-free** figures for use outside the 12-metric panel.
+
+    Same ``(stats, structural, config)`` triple as :func:`plot_metrics_panel`, and the same
+    styling — axis labels, legend, mean ± SD band — minus the titles, so each figure
+    can carry its own caption in a thesis or paper.
+
+    Figures (returned as ``{name: Figure}``, saved as ``{save_dir}/{name}{suffix}.svg``
+    and ``.png``):
+
+    ========================== ==================================================
+    ``particle_counts``        free Qt/Ft and clustered QtC/FtC over time
+    ``avg_cluster_size``       mean cluster size over time
+    ``largest_cluster_size``   largest cluster over time
+    ``cluster_size_distribution``  stacked particle fractions per size category
+    ========================== ==================================================
+
+    A metric whose keys are absent renders the usual "No data" placeholder rather than
+    raising, so a partially-analysed ensemble still produces the remaining figures.
+    """
+    config = config or {}
+    timestep = config.get('timestep', 1e-4)
+    times_us, time_label = _time_axis(_steps_to_us(np.asarray(stats['times']), timestep))
+    n_replicas = stats.get('n_replicas', 1)
+    figures: Dict[str, plt.Figure] = {}
+
+    def _new_ax():
+        fig, ax = plt.subplots(figsize=figsize)
+        return fig, ax
+
+    def _finish(fig, ax, ylabel):
+        ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
+        ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
+        fig.tight_layout()
+
+    # --- 1. particle counts -------------------------------------------------
+    fig, ax = _new_ax()
+    particle_colors = {'qt': 'blue', 'ft': 'red', 'qtc': 'darkblue', 'ftc': 'darkred'}
+    particle_labels = {'qt': 'Qt (free)', 'ft': 'Ft (free)', 'qtc': 'QtC', 'ftc': 'FtC'}
+    has_particle_data = False
+    for ptype in ['qt', 'ft', 'qtc', 'ftc']:
+        key_mean, key_std = f'{ptype}_count_mean', f'{ptype}_count_std'
+        if key_mean in stats:
+            mean = np.asarray(stats[key_mean])
+            std = np.asarray(stats[key_std])
+            ax.plot(times_us, mean, color=particle_colors[ptype],
+                    linewidth=2, label=particle_labels[ptype])
+            ax.fill_between(times_us, mean - std, mean + std,
+                            color=particle_colors[ptype], alpha=0.2)
+            has_particle_data = True
+    if has_particle_data:
+        ax.legend(loc='center right', fontsize=FONTSIZE_LEGEND)
+    else:
+        _ensemble_show_no_data(ax)
+    _finish(fig, ax, "Count")
+    figures['particle_counts'] = fig
+
+    # --- 2 + 3. average and largest cluster size ----------------------------
+    for name, mean_key, std_key, color, ylabel, legend_loc in (
+        ('avg_cluster_size', 'avg_cluster_mean', 'avg_cluster_std',
+         'tab:olive', "Average Size (particles)", 'lower right'),
+        ('largest_cluster_size', 'largest_cluster_mean', 'largest_cluster_std',
+         'tab:orange', "Cluster Size (particles)", 'lower right'),
+    ):
+        fig, ax = _new_ax()
+        if mean_key in stats:
+            if _ensemble_plot_with_band(ax, times_us, stats[mean_key], stats[std_key],
+                                        color, n_replicas,
+                                        _ensemble_all_trace(stats, structural, mean_key[:-5]),
+                                        show_individual, individual_alpha):
+                ax.legend(loc=legend_loc, fontsize=FONTSIZE_LEGEND)
+        else:
+            _ensemble_show_no_data(ax)
+        _finish(fig, ax, ylabel)
+        figures[name] = fig
+
+    # --- 4. cluster size distribution ---------------------------------------
+    fig, ax = _new_ax()
+    dist_time_label = time_label
+    if structural and 'size_fractions_times' in structural and \
+            'size_fractions_category_names' in structural:
+        sc_times, dist_time_label = _time_axis(
+            _steps_to_us(np.asarray(structural['size_fractions_times']), timestep))
+        category_names = list(structural['size_fractions_category_names'])
+        mean_fractions = []
+        for cat_name in category_names:
+            mean_key = f'size_frac_{_size_category_key(cat_name)}_mean'
+            mean_fractions.append(np.asarray(structural[mean_key])
+                                  if mean_key in structural else np.zeros(len(sc_times)))
+        colors = ["tab:blue", "tab:green", "tab:orange", "tab:red", "tab:purple"]
+        ax.stackplot(sc_times, *mean_fractions, labels=category_names,
+                     colors=colors[:len(category_names)], alpha=0.8)
+        ax.set_ylim([0, 1])
+        ax.legend(loc='upper right', fontsize=FONTSIZE_LEGEND)
+    else:
+        _ensemble_show_no_data(ax)
+    ax.set_xlabel(dist_time_label, fontsize=FONTSIZE_LABEL)
+    ax.set_ylabel("Fraction", fontsize=FONTSIZE_LABEL)
+    fig.tight_layout()
+    figures['cluster_size_distribution'] = fig
+
+    if save_dir:
+        os.makedirs(save_dir, exist_ok=True)
+        for name, fig in figures.items():
+            for ext in ("svg", "png"):
+                path = os.path.join(save_dir, f"{name}{suffix}.{ext}")
+                fig.savefig(path, format=ext, bbox_inches='tight', dpi=300)
+            print(f"✓ Saved {name}{suffix}.svg + .png")
+
+    return figures
 
 
 def plot_comparison_panel(
