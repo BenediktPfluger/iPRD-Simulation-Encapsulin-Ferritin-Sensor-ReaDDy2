@@ -1,0 +1,64 @@
+# =============================================================================
+# Simulation data — NEVER commit (tens of GB; GitHub caps files at 100 MB)
+# =============================================================================
+# Whole ensemble/data tree
+Different_Particle_Ratios/
+# Single-run output tree
+Simulation_Files_Single_Runs/
+# Ensemble output tree
+Simulation_Files_Ensembles/
+
+# Trajectories and exports (large)
+*.h5
+*.xyz
+
+# Aggregated ensemble outputs (can be tens-to-hundreds of MB)
+*.npz
+ensemble_state.json
+ensemble_statistics.json
+ensemble_structural.npz
+
+# FIB-SEM comparison exports (regenerate from a trajectory with
+# Export_for_FIB-SEM_Comparison.ipynb / qtft.fibsem_export)
+FIBSEM_Comparison_Export/
+encapsulin_centroids*.csv
+structural_information_and_metadata*.json
+
+# Generated figures (regenerate from data)
+*.svg
+*.png
+*.pdf
+
+# ...but keep the curated README figures committed
+!docs/images/
+!docs/images/*.png
+
+# Per-replica config dumps live with the data
+configs/
+logs/
+replica_*/
+
+# =============================================================================
+# Internal docs — keep local, not on GitHub
+# =============================================================================
+CLAUDE.md
+CODE_REVIEW.md
+
+# =============================================================================
+# Python
+# =============================================================================
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.venv/
+env/
+venv/
+
+# =============================================================================
+# OS / editor
+# =============================================================================
+.DS_Store
+.vscode/
+.idea/
+tools/
