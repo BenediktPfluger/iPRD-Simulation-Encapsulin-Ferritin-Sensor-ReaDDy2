@@ -62,8 +62,13 @@ def create_system(
     readdy.ReactionDiffusionSystem
         Configured system ready for simulation
     """
-    # Create system with correct box size from the start
-    system = readdy.ReactionDiffusionSystem(box_size=list(config.box_size))
+    # Create system with correct box size and temperature from the start. The temperature
+    # must be set here: readdy.Simulation has no temperature property, and without this
+    # argument ReaDDy silently falls back to its 293 K default (kBT = 2.436 kJ/mol).
+    system = readdy.ReactionDiffusionSystem(
+        box_size=list(config.box_size),
+        temperature=float(config.temperature) * readdy.units.kelvin,
+    )
 
     if not config.is_periodic:
         system.periodic_boundary_conditions = [False, False, False]

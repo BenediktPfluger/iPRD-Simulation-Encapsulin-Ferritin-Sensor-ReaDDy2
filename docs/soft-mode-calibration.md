@@ -108,6 +108,14 @@ per-step **overshoot ratio**
 alpha = k · D · dt / (kB·T)          kB·T = 2.494 kJ/mol at 300 K
 ```
 
+> **Temperature in older runs.** Until 2026-10-02, `config.temperature` never reached
+> ReaDDy: it was assigned to the `Simulation` object, which has no such property. Every run
+> before that fix — including all existing datasets and the measurements on this page — ran at
+> ReaDDy's default **293 K (kB·T = 2.436 kJ/mol)**, even though their config JSON records
+> 300 K. `D`, `k` and the weak-mode depths are absolute inputs, so diffusion is unchanged; only
+> kB·T-relative quantities (overlap depth, bond fluctuations, `alpha`) differ, by about 2.3 %.
+> The temperature is now passed to `ReactionDiffusionSystem` in `create_system`.
+
 A particle pushed out of an overlap `δ` moves `alpha·δ` in one Euler step, so `alpha ≥ 1`
 means it overshoots and the pair oscillates. A cross pair is governed by the *faster*
 species. Sweep it with `scripts/calibrate_soft_k.py`, which reports `alpha` alongside the

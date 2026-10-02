@@ -151,9 +151,8 @@ def create_simulation(
         skin=0.0,
     )
     
-    # Set temperature (timestep is passed to simulation.run() instead)
-    simulation.temperature = float(config.temperature)
-    
+    # Temperature is set on the system in create_system; timestep is passed to run().
+
     # Configure threading
     if config.kernel == "CPU" and config.n_threads is not None:
         simulation.kernel_configuration.n_threads = int(config.n_threads)
@@ -382,9 +381,8 @@ def equilibrate_system(
         skin=0.0,
     )
     
-    # Set temperature
-    eq_simulation.temperature = float(config.temperature)
-    
+    # Temperature is set on the system in create_system.
+
     # Configure threading
     if config.kernel == "CPU" and config.n_threads is not None:
         eq_simulation.kernel_configuration.n_threads = int(config.n_threads)
