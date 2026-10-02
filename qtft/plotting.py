@@ -10,6 +10,8 @@ from the same ``(stats, structural, config)`` triple:
     plot_large_cluster_count   number of clusters above a size threshold
 
 ``plot_comparison_panel`` is the cross-ensemble variant of the overview.
+``plot_overlap_timeseries`` plots particle-pair overlaps over time for one trajectory
+(from ``analysis.get_overlap_timeseries``).
 
 Related modules:
     - qtft.config / qtft.system / qtft.engine: configuration and simulation execution
@@ -492,6 +494,93 @@ def plot_large_cluster_count(
     ax.set_ylabel("Number of clusters", fontsize=FONTSIZE_LABEL)
     ax.set_title(title if title is not None else f"Clusters with size ≥ {min_size}",
                  fontsize=FONTSIZE_TITLE, fontweight='bold')
+    plt.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, bbox_inches='tight', dpi=300)
+        print(f"✓ Saved plot to {save_path}")
+    if save_path_base:
+        for ext in ("svg", "png"):
+            p = f"{save_path_base}.{ext}"
+            fig.savefig(p, format=ext, bbox_inches='tight', dpi=300)
+            print(f"✓ Saved plot to {p}")
+    return fig
+
+
+# Pair-family colours for the overlap plot: Qt-Qt / Ft-Ft reuse the species colours,
+# the cross pair gets a third, distinct hue.
+_OVERLAP_PAIR_COLORS = {"Qt-Qt": SPECIES_COLOR_QT, "Qt-Ft": 'tab:purple',
+                        "Ft-Ft": SPECIES_COLOR_FT}
+
+# metric key -> (y-axis label, scale factor applied to the stored values)
+_OVERLAP_METRICS = {
+    "n_overlapping": ("Overlapping pairs", 1.0),
+    "frac_overlapping": ("Fraction of pairs overlapping", 1.0),
+    "mean_overlap_all_frac": ("Mean interpenetration (% of contact)", 100.0),
+    "max_overlap_frac": ("Deepest interpenetration (% of contact)", 100.0),
+}
+
+
+def plot_overlap_timeseries(
+    ts: Dict[str, Any],
+    *,
+    metric: str = "n_overlapping",
+    log_y: bool = True,
+    title: Optional[str] = None,
+    save_path: Optional[str] = None,
+    save_path_base: Optional[str] = None,
+    figsize: Tuple[float, float] = (9, 5.5),
+) -> plt.Figure:
+    """Plot particle-pair overlaps over time, one line per pair family.
+
+    Parameters
+    ----------
+    ts : dict
+        Result of ``analysis.get_overlap_timeseries`` (time axis already in µs).
+    metric : str
+        Which per-frame quantity to plot: ``"n_overlapping"`` (default — number of
+        pairs with distance < r_i + r_j), ``"frac_overlapping"``,
+        ``"mean_overlap_all_frac"`` or ``"max_overlap_frac"`` (the last two in % of
+        contact).
+    log_y : bool
+        Log y-axis (default), since the families differ by orders of magnitude.
+        Frames with zero overlap cannot be shown on a log axis and leave gaps; a family
+        with no overlap at all is listed in the legend as "(none)". Falls back to a
+        linear axis when nothing overlaps.
+    title : str, optional
+        Figure title; none by default, so the figure can carry its own caption.
+    save_path / save_path_base : str, optional
+        Save one file, or paired ``.svg`` + ``.png``.
+    """
+    if metric not in _OVERLAP_METRICS:
+        raise ValueError(f"metric must be one of {list(_OVERLAP_METRICS)}, got {metric!r}")
+    ylabel, scale = _OVERLAP_METRICS[metric]
+
+    fig, ax = plt.subplots(figsize=figsize)
+    t, time_label = _time_axis(ts["time_us"])
+
+    any_positive = False
+    for label, fam in ts["pairs"].items():
+        y = np.asarray(fam[metric], dtype=float) * scale
+        positive = np.isfinite(y) & (y > 0)
+        color = _OVERLAP_PAIR_COLORS.get(label)
+        if not positive.any():
+            # Nothing to draw on either axis type beyond a flat zero; keep it in the legend.
+            ax.plot([], [], color=color, label=f"{label} (none)")
+            continue
+        any_positive = True
+        if log_y:
+            y = np.where(positive, y, np.nan)
+        ax.plot(t, y, marker='o', markersize=3, linewidth=1.5, color=color, label=label)
+
+    if log_y and any_positive:
+        ax.set_yscale('log')
+    ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
+    ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
+    ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
+    ax.tick_params(labelsize=FONTSIZE_TICK)
+    if title:
+        ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
     plt.tight_layout()
 
     if save_path:

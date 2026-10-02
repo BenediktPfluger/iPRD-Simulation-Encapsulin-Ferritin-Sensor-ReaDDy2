@@ -183,7 +183,7 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `qtft.engine` | Build + run: `create_simulation`, `place_particles`, `run_simulation`, `equilibrate_system`, and the one-shot `run_one`. |
 | `qtft.ensemble` | `EnsembleSimulation` class — multi-replica orchestration, local/parallel runs, SLURM script generation, result collection, statistics, save/load. |
 | `qtft.analysis` | Matplotlib-free trajectory analysis: cluster stats, bond counts, binding kinetics, morphology (Rg), spatial distribution, contacts, composition, size fractions. Also `convert_h5_to_xyz` (OVITO), `load_ensemble_data`, and numeric results tables (`build_final_state_table`, `save_table_files`). |
-| `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_metrics_panel` / `plot_comparison_panel` (each writes paired SVG + PNG via `save_path_base`). |
+| `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_metrics_panel` / `plot_comparison_panel` (each writes paired SVG + PNG via `save_path_base`), and `plot_overlap_timeseries` (overlapping pairs over time). |
 | `qtft.comparison` | Cross-ensemble comparison helpers (`compare_ensembles`, `save/load_comparison_data`, `build_comparison_table`, …). |
 | `qtft.fibsem_export` | Export the **final frame** to the FIB-SEM segmentation schema for experiment comparison: encapsulin (Qt/QtC) centroids with ground-truth cluster IDs, written into `<run_dir>/FIBSEM_Comparison_Export/` beside the run. Read-only — it consumes a finished trajectory and never runs a simulation. See [docs/fibsem-export.md](docs/fibsem-export.md). |
 | `scripts/analyze_ensemble.py` | CLI to (re)analyze an ensemble directory in parallel; `compare` subcommand. |
@@ -191,7 +191,7 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `scripts/check_codebase.py` | Standing consistency check: dead functions, unused imports, and README/docstring names that no longer exist. AST-based, so a name inside a docstring or log string does not keep dead code alive, while a function passed by reference is correctly seen as used. `--strict` exits non-zero for CI or a pre-commit hook. |
 | `scripts/calibrate_timestep.py` | CLI "measure-first" sweep over `(timestep, diffusion)` in **soft** mode: reports stability (finite + bond-length drift), the diffusion criterion, reaction-probability saturation, the largest stable `dt`, and reachable simulated time. See [docs/soft-mode-calibration.md](docs/soft-mode-calibration.md). |
 | `scripts/calibrate_soft_k.py` | CLI sweep over the **soft**-mode force constants `soft.k_*`: measures interpenetration (via `analysis.get_overlap_statistics`) against numerical stability, reported with the per-step overshoot ratio `alpha = k·D·dt/(kB·T)`. See [docs/soft-mode-calibration.md](docs/soft-mode-calibration.md). |
-| `Run_Simulation.ipynb` | Run-only notebook: one **Configuration** cell (all parameters) + one **Run** cell that dispatches on `RUN_MODE` (`single`/`ensemble`) and `ENABLE_DEAGG` (plain vs agglomeration↔deagglomeration cycling); optional SLURM cell. No plotting. |
+| `Run_Simulation.ipynb` | Run-only notebook: one **Configuration** cell (all parameters) + one **Run** cell that dispatches on `RUN_MODE` (`single`/`ensemble`) and `ENABLE_DEAGG` (plain vs agglomeration↔deagglomeration cycling); optional SLURM cell. Its only plot is the optional overlap-vs-time figure (`PLOT_OVERLAP`, saved under `Plots/`). |
 | `Plot_Simulation_Results.ipynb` | Plotting/reporting notebook: one **Settings** cell + one **Run** cell selected by `MODE` (`single` trajectory / `ensemble` directory / `comparison` of several). Each mode auto-generates the plots **and** the text summary **and** the data/table exports (CSV/LaTeX) into a `Plots/` folder. |
 | `Export_for_FIB-SEM_Comparison.ipynb` | Export notebook: points at a finished run, writes the encapsulin centroid CSV + metadata JSON in the FIB-SEM schema, and plots a cluster-coloured scatter as a periodic-unwrap sanity check. See [docs/fibsem-export.md](docs/fibsem-export.md). |
 | `docs/soft-mode-calibration.md` | Why soft mode reaches a µs timestep: stability bounds, the `alpha = k·D·dt/(kB·T)` overshoot rule, the measured force-constant sweep, and both calibration CLIs. |
@@ -420,7 +420,7 @@ This (re)writes `ensemble_statistics.json` and `ensemble_structural.npz`.
 | Contacts | coordination numbers per particle type, bonds per cluster |
 | Composition | Qt-fraction per cluster and vs cluster size |
 | RDF | Qt/QtC–Ft/FtC radial distribution (a ReaDDy observable) |
-| Overlap | per species pair: closest approach, fraction of pairs overlapping, mean/p95/max interpenetration depth |
+| Overlap | per species pair: closest approach, fraction of pairs overlapping, mean/p95/max interpenetration depth; `get_overlap_timeseries` gives the same per sampled frame |
 
 Three things about these numbers are easy to get wrong:
 
