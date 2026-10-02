@@ -33,7 +33,7 @@ import logging
 import json
 import os
 import warnings
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import h5py
 import numpy as np
@@ -443,9 +443,11 @@ def _read_position_frames(
     h5_file: str,
     config: SimulationConfig,
     last_n: Optional[int] = None,
+    frame_indices: Optional[Sequence[int]] = None,
 ) -> Dict[str, Any]:
     """
-    Read positions and type names for the *last* ``last_n`` recorded frames.
+    Read positions and type names for the *last* ``last_n`` recorded frames, or for an
+    explicit set of ``frame_indices``.
 
     A positions-only counterpart to ``_extract_frame_data`` for analyses that need
     neither topology membership nor edges. ``_extract_frame_data`` always decodes the
@@ -467,6 +469,11 @@ def _read_position_frames(
         Configuration (unused for the read itself; kept for signature symmetry).
     last_n : int, optional
         Number of trailing frames to read. ``None`` or <= 0 reads every frame.
+        Ignored when ``frame_indices`` is given.
+    frame_indices : sequence of int, optional
+        Specific recorded-frame indices to read (sorted, de-duplicated; negative
+        indices count from the end). Each is read as its own one-frame slice, so a
+        sparse sample of a long trajectory costs only the frames requested.
 
     Returns
     -------
@@ -491,13 +498,24 @@ def _read_position_frames(
     if total == 0:
         raise ValueError(f"No frames found in {h5_file}")
 
-    n_use = total if (last_n is None or last_n <= 0) else min(int(last_n), total)
-    start = total - n_use
+    if frame_indices is not None:
+        idx = sorted({int(i) + total if int(i) < 0 else int(i) for i in frame_indices})
+        bad = [i for i in idx if not 0 <= i < total]
+        if bad:
+            raise IndexError(f"frame_indices {bad} out of range for {total} frames")
+        if not idx:
+            raise ValueError("frame_indices is empty")
+        slices = [(i, i + 1) for i in idx]
+    else:
+        n_use = total if (last_n is None or last_n <= 0) else min(int(last_n), total)
+        idx = list(range(total - n_use, total))
+        slices = [(total - n_use, total)]
 
     trajectory = readdy.Trajectory(h5_file)
     # to_numpy() rejects None bounds, so both ends are always passed explicitly.
-    # `stop` is exclusive.
-    n_per_frame, positions, type_ids, _ids = trajectory.to_numpy(start=start, stop=total)
+    # `stop` is exclusive. Each slice is padded to its own largest frame, so frames are
+    # sliced back to their real particle count below.
+    chunks = [trajectory.to_numpy(start=a, stop=b) for a, b in slices]
 
     # Vectorized id -> name lookup. dtype=object so the "type_<id>" fallback for an
     # unknown id is not truncated -- callers compare these names as strings.
@@ -509,22 +527,23 @@ def _read_position_frames(
 
     positions_list: List[np.ndarray] = []
     types_list: List[np.ndarray] = []
-    for i in range(positions.shape[0]):
-        # to_numpy pads every frame to the largest one; slice back to the real count.
-        n_i = int(n_per_frame[i])
-        positions_list.append(np.asarray(positions[i, :n_i], dtype=float))
-        ids_i = np.asarray(type_ids[i, :n_i], dtype=np.int64)
-        if ids_i.size and max_id >= 0:
-            known = ids_i <= max_id
-            names = np.empty(ids_i.size, dtype=object)
-            names[known] = lookup[ids_i[known]]
-            names[~known] = [f"type_{t}" for t in ids_i[~known]]
-        else:
-            names = np.array([], dtype=object)
-        types_list.append(names)
+    for n_per_frame, positions, type_ids, _ids in chunks:
+        for i in range(positions.shape[0]):
+            # to_numpy pads every frame to the largest one; slice back to the real count.
+            n_i = int(n_per_frame[i])
+            positions_list.append(np.asarray(positions[i, :n_i], dtype=float))
+            ids_i = np.asarray(type_ids[i, :n_i], dtype=np.int64)
+            if ids_i.size and max_id >= 0:
+                known = ids_i <= max_id
+                names = np.empty(ids_i.size, dtype=object)
+                names[known] = lookup[ids_i[known]]
+                names[~known] = [f"type_{t}" for t in ids_i[~known]]
+            else:
+                names = np.array([], dtype=object)
+            types_list.append(names)
 
     return {
-        "times": np.asarray(all_times[start:total]),
+        "times": np.asarray(all_times[idx]),
         "n_frames": len(positions_list),
         "positions": positions_list,
         "types": types_list,
@@ -1865,6 +1884,116 @@ def get_overlap_statistics(
         "n_frames_used": len(steps),
         "steps": steps,
         "time_us": float(_steps_to_us(last_step, config.timestep)),
+        "pairs": pairs,
+    }
+
+
+#: Per-family fields reported per frame by ``get_overlap_timeseries``.
+_OVERLAP_TS_KEYS = ("n_overlapping", "frac_overlapping",
+                    "mean_overlap_all_frac", "max_overlap_frac")
+
+
+def get_overlap_timeseries(
+    h5_file: str,
+    config: SimulationConfig,
+    n_points: int = 50,
+    max_bytes: int = _OVERLAP_MAX_BYTES,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    Pair interpenetration over time, one value per sampled frame.
+
+    The per-frame counterpart to ``get_overlap_statistics``: the same definition (a pair
+    overlaps when its centre-to-centre distance is below ``r_i + r_j``; bonded and
+    unbonded pairs alike, free and clustered species grouped) and the same blocked
+    kernel, but evaluated frame by frame instead of pooled. The last point therefore
+    equals ``get_overlap_statistics(..., n_frames=1)`` exactly.
+
+    The all-pairs kernel costs seconds per frame at ~20k particles, so by default only
+    ``n_points`` evenly spaced frames are evaluated (always including the first and
+    last). Nothing is persisted.
+
+    Parameters
+    ----------
+    h5_file : str
+        Path to trajectory HDF5 file (a stitched ``trajectory_combined.h5`` works too).
+    config : SimulationConfig
+        Configuration (particle radii/names, box size, boundary, timestep).
+    n_points : int
+        Number of frames to sample (default: 50). Values <= 0, or more than the
+        recorded frame count, use every frame.
+    max_bytes : int
+        Working-set budget for the pair kernel (default: 256 MiB), passed through.
+    verbose : bool
+        Show a progress bar (if tqdm is installed).
+
+    Returns
+    -------
+    dict with keys:
+        steps : ndarray of int    -- simulation step of each sampled frame
+        time_us : ndarray         -- the same, in microseconds
+        n_particles : ndarray     -- particle count per sampled frame
+        pairs : dict              -- {"Qt-Qt"/"Qt-Ft"/"Ft-Ft": {...}} with per family
+                                     arrays (one entry per sampled frame) of
+                                     n_overlapping, frac_overlapping,
+                                     mean_overlap_all_frac, max_overlap_frac
+                                     (see ``get_overlap_statistics``), plus the scalar
+                                     contact distance (nm).
+    """
+    with h5py.File(h5_file, "r") as handle:
+        group = handle.get("readdy/trajectory")
+        total = int(group["limits"].shape[0]) if group is not None and "limits" in group else 0
+    if total == 0:
+        raise ValueError(f"No frames found in {h5_file}")
+
+    if n_points <= 0 or n_points >= total:
+        frame_idx = np.arange(total)
+    else:
+        frame_idx = np.unique(np.linspace(0, total - 1, int(n_points)).round().astype(int))
+
+    box = np.asarray(config.box_size, dtype=float)
+    qt_names = {config.qt.name, config.qt.cluster_name}
+    ft_names = {config.ft.name, config.ft.cluster_name}
+    rq, rf = config.qt.radius, config.ft.radius
+    contacts = {"Qt-Qt": 2.0 * rq, "Qt-Ft": rq + rf, "Ft-Ft": 2.0 * rf}
+
+    series = {label: {k: [] for k in _OVERLAP_TS_KEYS} for label in contacts}
+    steps: List[int] = []
+    n_particles: List[int] = []
+
+    frame_iter = tqdm(frame_idx, desc="    Overlap per frame", unit="frame") \
+        if TQDM_AVAILABLE and verbose else frame_idx
+    for fi in frame_iter:
+        # One frame at a time keeps memory at a single frame's positions.
+        data = _read_position_frames(h5_file, config, frame_indices=[int(fi)])
+        pos = np.asarray(data["positions"][0], dtype=float)
+        types = np.asarray(data["types"][0])
+        acc = {label: _OverlapAccumulator(c) for label, c in contacts.items()}
+        if pos.size:
+            _accumulate_overlap_frame(
+                acc, pos, types, box,
+                periodic=config.is_periodic,
+                qt_names=qt_names, ft_names=ft_names,
+                max_bytes=max_bytes,
+            )
+        for label in contacts:
+            res = acc[label].result()
+            for k in _OVERLAP_TS_KEYS:
+                series[label][k].append(res[k])
+        steps.append(int(data["times"][0]))
+        n_particles.append(int(pos.shape[0]))
+
+    steps_arr = np.asarray(steps, dtype=np.int64)
+    pairs: Dict[str, Dict[str, Any]] = {}
+    for label, contact in contacts.items():
+        pairs[label] = {k: np.asarray(v, dtype=float if k != "n_overlapping" else np.int64)
+                        for k, v in series[label].items()}
+        pairs[label]["contact"] = float(contact)
+
+    return {
+        "steps": steps_arr,
+        "time_us": np.asarray(_steps_to_us(steps_arr, config.timestep), dtype=float),
+        "n_particles": np.asarray(n_particles, dtype=np.int64),
         "pairs": pairs,
     }
 
