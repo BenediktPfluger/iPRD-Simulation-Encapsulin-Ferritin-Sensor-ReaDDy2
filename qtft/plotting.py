@@ -6,12 +6,16 @@ single run, ensemble, cross-ensemble comparison — produces the same three figu
 from the same ``(stats, structural, config)`` triple:
 
     plot_metrics_panel         12-metric overview (single run or ensemble)
-    plot_kinetics              bonds / fraction bound / avg cluster size (phase-aware)
-    plot_large_cluster_count   number of clusters above a size threshold
+    plot_kinetics              bonds / fraction bound / avg agglomerate size (phase-aware)
+    plot_large_cluster_count   number of agglomerates above a size threshold
 
 ``plot_comparison_panel`` is the cross-ensemble variant of the overview.
 ``plot_overlap_timeseries`` plots particle-pair overlaps over time for one trajectory
 (from ``analysis.get_overlap_timeseries``).
+
+All figures use the Nature style (``NATURE_RC``: Arial, 7/6 pt, drawn at 89 mm or 183 mm)
+and ``save_path_base`` writes PDF + SVG + PNG; the multi-panel figures also write every panel
+as a separate, title-free 89 mm figure into ``{save_path_base}_subfigures/``.
 
 Related modules:
     - qtft.config / qtft.system / qtft.engine: configuration and simulation execution

@@ -183,7 +183,7 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
 | `qtft.engine` | Build + run: `create_simulation`, `place_particles`, `run_simulation`, `equilibrate_system`, and the one-shot `run_one`. |
 | `qtft.ensemble` | `EnsembleSimulation` class — multi-replica orchestration, local/parallel runs, SLURM script generation, result collection, statistics, save/load. |
 | `qtft.analysis` | Matplotlib-free trajectory analysis: cluster stats, bond counts, binding kinetics, morphology (Rg), spatial distribution, contacts, composition, size fractions. Also `convert_h5_to_xyz` (OVITO), `load_ensemble_data`, and numeric results tables (`build_final_state_table`, `save_table_files`). |
-| `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_metrics_panel` / `plot_comparison_panel` (each writes paired SVG + PNG via `save_path_base`), and `plot_overlap_timeseries` (overlapping pairs over time). |
+| `qtft.plotting` | All matplotlib plots: single-run, ensemble, and cross-ensemble comparison figures, including the composite "thesis" panels `plot_metrics_panel` / `plot_comparison_panel` and `plot_overlap_timeseries` (overlapping pairs over time). Nature figure style; `save_path_base` writes PDF + SVG + PNG and, for multi-panel figures, every panel again as a separate 89 mm figure (see [Plotting](#10-plotting)). |
 | `qtft.comparison` | Cross-ensemble comparison helpers (`compare_ensembles`, `save/load_comparison_data`, `build_comparison_table`, …). |
 | `qtft.fibsem_export` | Export the **final frame** to the FIB-SEM segmentation schema for experiment comparison: encapsulin (Qt/QtC) centroids with ground-truth cluster IDs, written into `<run_dir>/FIBSEM_Comparison_Export/` beside the run. Read-only — it consumes a finished trajectory and never runs a simulation. See [docs/fibsem-export.md](docs/fibsem-export.md). |
 | `scripts/analyze_ensemble.py` | CLI to (re)analyze an ensemble directory in parallel; `compare` subcommand. |
@@ -212,6 +212,11 @@ All code lives in the **`qtft`** package; `scripts/` holds thin CLI wrappers.
   ReaDDy asks to be cited in any work that uses it — see
   [Citing ReaDDy](#13-citing-readdy).
 - `numpy`, `matplotlib`, `pandas`, `h5py` (pulled in by ReaDDy / standard scientific stack).
+- **Arial** for figures. `qtft.plotting` registers it from the Windows font folder under WSL
+  (`/mnt/c/Windows/Fonts`), `~/.fonts` or `~/.local/share/fonts`, or from a folder named in
+  `QTFT_FONT_DIR`; without it, figures fall back to Liberation Sans / DejaVu Sans with a
+  warning (`plotting.ARIAL_AVAILABLE` tells which). The font files are never copied into the
+  repository — Arial is licensed by Microsoft.
 - For visualization of `.xyz` exports: [OVITO](https://www.ovito.org/) (external, optional).
 
 Progress messages are emitted through the `qtft` logger (streamed to stdout by default, so
@@ -476,12 +481,21 @@ data comes from `analysis.get_large_cluster_counts` / `get_large_cluster_counts_
 **re-read the replica trajectories** (the aggregated `.npz` stores no per-frame size
 distribution), so the threshold stays freely adjustable at ≈ 2 s per replica.
 
-Every figure is written as paired **SVG + PNG**. `SHOW_SPREAD` overlays per-replica traces
+**Figure style (Nature).** Every figure is drawn at its final size — 89 mm single column,
+183 mm for the composite panels, at most 170 mm tall — in Arial (7 pt labels, 6 pt ticks), with
+0.5 pt axes, inward ticks on all four sides, 1 pt data lines, frameless legends and no titles
+(composite panels keep their panel titles). Each is saved as **PDF + SVG + PNG** (300 dpi) with
+editable text. Multi-panel figures (`panel`, `kinetics`) additionally save every panel as a
+separate, title-free 89 mm figure in `<name>_subfigures/` — e.g. `Plots/panel_subfigures/bonds.pdf`.
+The style is applied per plot function only (`plotting.NATURE_RC`), so other matplotlib figures
+in the same session are unaffected; labels use "agglomerate" for a bound cluster.
+
+`SHOW_SPREAD` overlays per-replica traces
 (ensemble) or bands (comparison). Each mode also writes a final-state table (CSV + LaTeX) and a
 bonds time-series CSV per target; `single` additionally exports an OVITO `.xyz` when
 `EXPORT_XYZ` is set.
 
-> The panel's **Coordination Distribution (Final)** cell reads the `final_coord_dist_qt` /
+> The panel's **Final coordination distribution** cell reads the `final_coord_dist_qt` /
 > `final_coord_dist_ft` / `final_coord_dist_n_replicas` keys of `ensemble_structural.npz`. These
 > were added later, so ensembles analysed before then render that one cell as "No data" — re-run
 > `scripts/analyze_ensemble.py --ensemble-dir <dir>` to populate them (no re-simulation needed).
