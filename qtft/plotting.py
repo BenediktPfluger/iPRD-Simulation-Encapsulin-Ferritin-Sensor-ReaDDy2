@@ -336,14 +336,14 @@ def _ensemble_plot_with_band(
         mean_label = label
     else:
         mean_label = 'Run' if single_run else f'Mean (N={n_replicas})'
-    ax.plot(times, mean, color=color, linewidth=2, label=mean_label)
+    ax.plot(times, mean, color=color, label=mean_label)
     if not single_run:
         ax.fill_between(times, mean - std, mean + std, color=color, alpha=0.3,
-                        label=band_label)
+                        linewidth=0, label=band_label)
 
     if show_individual and all_data is not None and not single_run:
         for data in all_data:
-            ax.plot(times, data, color=color, alpha=individual_alpha, linewidth=0.5)
+            ax.plot(times, data, color=color, alpha=individual_alpha, linewidth=0.4)
     
     return True
 
@@ -352,7 +352,7 @@ def _ensemble_plot_with_band(
 def _ensemble_show_no_data(ax):
     """Helper to show 'No data available' message on axes."""
     ax.text(0.5, 0.5, "No data available", ha='center', va='center',
-           transform=ax.transAxes, fontsize=FONTSIZE_TITLE, color='gray')
+           transform=ax.transAxes, color='gray')
 
 
 def _ensemble_all_trace(stats: Dict, structural: Optional[Dict], key: str):
@@ -577,20 +577,39 @@ def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool,
     return has_data
 
 
+# Short forms used when a phase name does not fit its span on a narrow figure.
+_PHASE_SHORT_NAMES = {"agglomerate": "agg.", "deagglomerate": "deagg."}
+
+
 def _mark_phase_boundaries(ax, boundaries_us, starts_us=None, names=None):
-    """Draw vertical lines at phase switches and (optionally) label each phase span."""
+    """Draw vertical lines at phase switches and (optionally) label each phase span.
+
+    Labels sit in headroom added above the data (no background box, so they never hide
+    data). A name wider than its span falls back to its short form ("agg."/"deagg.", or
+    the first four letters), and is dropped if even that does not fit.
+    """
     for b in boundaries_us:
-        ax.axvline(b, color="0.4", linestyle="--", linewidth=1.0, zorder=1)
-    if starts_us is not None and names is not None:
-        ylim = ax.get_ylim()
-        ytext = ylim[1] - 0.04 * (ylim[1] - ylim[0])
-        ends = list(starts_us[1:]) + [ax.get_xlim()[1]]
-        for name, s, e in zip(names, starts_us, ends):
-            ax.text(0.5 * (s + e), ytext, name, ha="center", va="top",
-                    fontsize=9, color="0.3",
-                    bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="0.7", alpha=0.7))
+        ax.axvline(b, color="0.4", linestyle="--", linewidth=0.5, zorder=1)
+    if not starts_us or not names:          # None or empty: nothing to label
+        return
+    lo, hi = ax.get_ylim()
+    ax.set_ylim(lo, hi + 0.14 * (hi - lo))           # headroom for one row of 6 pt labels
+    ends = list(starts_us[1:]) + [ax.get_xlim()[1]]
+    renderer = ax.figure.canvas.get_renderer()
+    to_data = ax.transData.inverted()
+    for name, s, e in zip(names, starts_us, ends):
+        short = _PHASE_SHORT_NAMES.get(str(name).lower(), f"{str(name)[:4]}.")
+        for candidate in (str(name), short):
+            txt = ax.text(0.5 * (s + e), 0.98, candidate, ha="center", va="top",
+                          fontsize=6, color="0.3", transform=ax.get_xaxis_transform())
+            bb = txt.get_window_extent(renderer)
+            (x0, _), (x1, _) = to_data.transform([[bb.x0, 0], [bb.x1, 0]])
+            if x1 - x0 <= 0.95 * (e - s):
+                break
+            txt.remove()
 
 
+@_nature_style
 def plot_large_cluster_count(
     series: List[Dict[str, Any]],
     min_size: int,
@@ -604,9 +623,9 @@ def plot_large_cluster_count(
     title: Optional[str] = None,
     show_individual: bool = False,
     individual_alpha: float = 0.3,
-    figsize: Tuple[float, float] = (9, 5.5),
+    figsize: Optional[Tuple[float, float]] = None,
 ) -> plt.Figure:
-    """Plot the number of clusters at or above a size threshold, over time.
+    """Plot the number of agglomerates at or above a size threshold, over time.
 
     Works for every mode: one entry in ``series`` for a single run or one ensemble, several
     for a cross-ensemble comparison.
@@ -618,16 +637,20 @@ def plot_large_cluster_count(
         optionally ``std``, ``all`` (per-replica traces) and ``n_replicas``. A single run
         passes ``n_replicas=1``, which suppresses the error band.
     min_size : int
-        The threshold these counts were computed with (used for the title/label).
+        The threshold these counts were computed with (shown in the y-axis label).
     timestep : float
         ns per step, for the step -> µs conversion.
     save_path / save_path_base : str, optional
-        Save one file, or paired ``.svg`` + ``.png``.
+        Save one file, or ``{save_path_base}.pdf/.svg/.png``.
     phase_boundaries_us, phase_starts_us, phase_names : optional
         Phase markers for an agglomeration<->deagglomeration run, as produced by
         ``analysis.load_phased_observables``.
+    title : str, optional
+        Figure title; none by default (the information belongs in the figure legend).
+    figsize : (float, float), optional
+        Inches; defaults to 89 × 45 mm (Nature single column).
     """
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize or figsize_mm(89, 45), layout='constrained')
 
     # One adaptive time unit for the whole figure, shared with the phase markers.
     max_us = 0.0
@@ -652,27 +675,23 @@ def plot_large_cluster_count(
     if not plotted:
         _ensemble_show_no_data(ax)
     else:
-        ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
+        ax.legend(loc='best')
 
     if phase_boundaries_us:
         bnd = list(np.asarray(phase_boundaries_us) * time_factor)
         starts = list(np.asarray(phase_starts_us) * time_factor) if phase_starts_us else None
         _mark_phase_boundaries(ax, bnd, starts, phase_names)
 
-    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel("Number of clusters", fontsize=FONTSIZE_LABEL)
-    ax.set_title(title if title is not None else f"Clusters with size ≥ {min_size}",
-                 fontsize=FONTSIZE_TITLE, fontweight='bold')
-    plt.tight_layout()
+    ax.set_xlabel(f"Time ({time_unit})")
+    ax.set_ylabel(f"Agglomerates (size ≥ {min_size})")
+    if title:
+        ax.set_title(title)
 
     if save_path:
         fig.savefig(save_path, bbox_inches='tight', dpi=300)
         print(f"✓ Saved plot to {save_path}")
     if save_path_base:
-        for ext in ("svg", "png"):
-            p = f"{save_path_base}.{ext}"
-            fig.savefig(p, format=ext, bbox_inches='tight', dpi=300)
-            print(f"✓ Saved plot to {p}")
+        _save_figure(fig, save_path_base)
     return fig
 
 
@@ -690,6 +709,7 @@ _OVERLAP_METRICS = {
 }
 
 
+@_nature_style
 def plot_overlap_timeseries(
     ts: Dict[str, Any],
     *,
@@ -698,7 +718,7 @@ def plot_overlap_timeseries(
     title: Optional[str] = None,
     save_path: Optional[str] = None,
     save_path_base: Optional[str] = None,
-    figsize: Tuple[float, float] = (9, 5.5),
+    figsize: Optional[Tuple[float, float]] = None,
 ) -> plt.Figure:
     """Plot particle-pair overlaps over time, one line per pair family.
 
@@ -719,13 +739,15 @@ def plot_overlap_timeseries(
     title : str, optional
         Figure title; none by default, so the figure can carry its own caption.
     save_path / save_path_base : str, optional
-        Save one file, or paired ``.svg`` + ``.png``.
+        Save one file, or ``{save_path_base}.pdf/.svg/.png``.
+    figsize : (float, float), optional
+        Inches; defaults to 89 × 45 mm (Nature single column).
     """
     if metric not in _OVERLAP_METRICS:
         raise ValueError(f"metric must be one of {list(_OVERLAP_METRICS)}, got {metric!r}")
     ylabel, scale = _OVERLAP_METRICS[metric]
 
-    fig, ax = plt.subplots(figsize=figsize)
+    fig, ax = plt.subplots(figsize=figsize or figsize_mm(89, 45), layout='constrained')
     t, time_label = _time_axis(ts["time_us"])
 
     any_positive = False
@@ -740,38 +762,87 @@ def plot_overlap_timeseries(
         any_positive = True
         if log_y:
             y = np.where(positive, y, np.nan)
-        ax.plot(t, y, marker='o', markersize=3, linewidth=1.5, color=color, label=label)
+        ax.plot(t, y, marker='o', markersize=1.0, color=color, label=label)
 
     if log_y and any_positive:
         ax.set_yscale('log')
-    ax.legend(loc='best', fontsize=FONTSIZE_LEGEND)
-    ax.set_xlabel(time_label, fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
-    ax.tick_params(labelsize=FONTSIZE_TICK)
+    ax.legend(loc='best')
+    ax.set_xlabel(time_label)
+    ax.set_ylabel(ylabel)
     if title:
-        ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-    plt.tight_layout()
+        ax.set_title(title)
 
     if save_path:
         fig.savefig(save_path, bbox_inches='tight', dpi=300)
         print(f"✓ Saved plot to {save_path}")
     if save_path_base:
-        for ext in ("svg", "png"):
-            p = f"{save_path_base}.{ext}"
-            fig.savefig(p, format=ext, bbox_inches='tight', dpi=300)
-            print(f"✓ Saved plot to {p}")
+        _save_figure(fig, save_path_base)
     return fig
 
 
+# Kinetics panels: (name used for the separate subfigure file, y-axis label)
+_KINETICS_PANELS = (
+    ("bonds", "Number of bonds"),
+    ("fraction_bound", "Fraction bound"),
+    ("avg_agglomerate_size", "Average agglomerate\nsize (particles)"),
+)
+
+
+def _draw_kinetics_panel(ax, which: int, series: List[Dict[str, Any]], time_factor: float,
+                         bnd: List[float], starts: List[float], names, *,
+                         phase_labels: bool, legend: bool) -> None:
+    """Draw kinetics panel ``which`` (0 bonds, 1 fraction bound, 2 average size) on ``ax``."""
+    multi = len(series) > 1
+    for i, entry in enumerate(series):
+        d = entry["data"]
+        label = entry.get("label")
+        colour = COMPARISON_COLORS[i % len(COMPARISON_COLORS)] if multi else None
+        if which == 0:
+            ax.plot(np.asarray(d["time_us"]) * time_factor, d["n_bonds"],
+                    color=colour if multi else "C0", label=label if multi else None)
+        elif which == 1:
+            # Per species when single, per ensemble (Qt solid / Ft dashed) when comparing,
+            # so N ensembles stay readable in one axes.
+            t_kin = np.asarray(d["kin_time_us"]) * time_factor
+            if multi:
+                ax.plot(t_kin, d["fraction_bound_qt"], color=colour, ls="-", label=label)
+                ax.plot(t_kin, d["fraction_bound_ft"], color=colour, ls="--",
+                        label="_nolegend_")
+            else:
+                ax.plot(t_kin, d["fraction_bound_qt"], color=SPECIES_COLOR_QT, label="Qt")
+                ax.plot(t_kin, d["fraction_bound_ft"], color=SPECIES_COLOR_FT, label="Ft")
+        else:
+            ax.plot(np.asarray(d["cluster_time_us"]) * time_factor, d["avg_sizes"],
+                    color=colour if multi else "tab:orange", label=label if multi else None)
+
+    ax.set_ylabel(_KINETICS_PANELS[which][1])
+    if which == 1:
+        ax.set_ylim(-0.05, 1.05)
+    _mark_phase_boundaries(ax, bnd, starts if phase_labels else None,
+                           names if phase_labels else None)
+
+    if not legend:
+        return
+    if which == 1 and multi:
+        # ensemble colours, plus a solid/dashed key for the two species
+        handles, labels = ax.get_legend_handles_labels()
+        style = [Line2D([0], [0], color="black", ls="-"),
+                 Line2D([0], [0], color="black", ls="--")]
+        ax.legend(handles + style, labels + ["Qt", "Ft"], loc="best")
+    elif which == 1 or multi:
+        ax.legend(loc="best")
+
+
+@_nature_style
 def plot_kinetics(
     series: List[Dict[str, Any]],
     *,
     save_path: Optional[str] = None,
     save_path_base: Optional[str] = None,
-    figsize: Tuple[float, float] = (11, 9),
+    figsize: Optional[Tuple[float, float]] = None,
     title: Optional[str] = None,
 ):
-    """Bonds / fraction bound / average cluster size on one continuous time axis.
+    """Bonds / fraction bound / average agglomerate size on one continuous time axis.
 
     Takes the same ``series`` list shape as ``plot_large_cluster_count``, so one function
     serves every mode: one entry for a single run or one ensemble, several for a
@@ -784,97 +855,63 @@ def plot_kinetics(
         ``analysis.load_phased_observables`` schema (also produced by
         ``analysis.build_kinetics_data_single`` and ``build_kinetics_data_ensemble``).
     save_path / save_path_base : str, optional
-        Save one file, or paired ``.svg`` + ``.png``.
+        Save one file, or ``{save_path_base}.pdf/.svg/.png``. With ``save_path_base`` the
+        three panels are additionally saved as separate, title-free 89 × 45 mm figures in
+        ``{save_path_base}_subfigures/`` (``bonds``, ``fraction_bound``,
+        ``avg_agglomerate_size``).
+    figsize : (float, float), optional
+        Inches; defaults to 89 × 95 mm (three stacked rows on one shared time axis).
     title : str, optional
-        Defaults to the cycle title when the first entry has phase boundaries, otherwise a
-        plain kinetics title.
+        Figure title; none by default (the information belongs in the figure legend).
 
     Notes
     -----
     With one entry the three panels keep their dedicated colours (bonds blue, Qt green /
-    Ft red, average cluster size orange). With several, each entry is coloured by ensemble
-    and the two species are distinguished by linestyle (Qt solid, Ft dashed) — the same
-    convention ``_comparison_coord_fused`` uses. Phase markers come from the first entry,
-    whose boundaries are shared by construction.
+    Ft red, average agglomerate size orange). With several, each entry is coloured by
+    ensemble and the two species are distinguished by linestyle (Qt solid, Ft dashed) —
+    the same convention ``_comparison_coord_fused`` uses. Phase markers come from the
+    first entry, whose boundaries are shared by construction.
     """
     if not series:
         raise ValueError("plot_kinetics requires at least one series entry")
-    multi = len(series) > 1
 
     # One adaptive time unit for the whole figure (all axes + phase markers), taken from the
     # longest series so the axes and boundary lines stay aligned.
     max_us = max(float(np.asarray(s["data"]["time_us"]).max())
                  if len(s["data"]["time_us"]) else 0.0 for s in series)
     time_factor, time_unit = choose_time_unit(max_us)
+    time_label = f"Time ({time_unit})"
 
     first = series[0]["data"]
     bnd = list(np.asarray(first["phase_boundaries_us"]) * time_factor) if first.get("phase_boundaries_us") else []
     starts = list(np.asarray(first["phase_starts_us"]) * time_factor) if first.get("phase_starts_us") else []
     names = first.get("phase_names")
 
-    fig, axes = plt.subplots(3, 1, figsize=figsize, sharex=True)
-
-    for i, entry in enumerate(series):
-        d = entry["data"]
-        label = entry.get("label")
-        colour = COMPARISON_COLORS[i % len(COMPARISON_COLORS)] if multi else None
-        t_bonds = np.asarray(d["time_us"]) * time_factor
-        t_kin = np.asarray(d["kin_time_us"]) * time_factor
-        t_clus = np.asarray(d["cluster_time_us"]) * time_factor
-
-        # 1) Bonds
-        axes[0].plot(t_bonds, d["n_bonds"], lw=1.5,
-                     color=colour if multi else "C0", label=label if multi else None)
-
-        # 2) Fraction bound — per species when single, per ensemble (Qt solid / Ft dashed)
-        #    when comparing, so N ensembles stay readable in one axes.
-        if multi:
-            axes[1].plot(t_kin, d["fraction_bound_qt"], color=colour, lw=1.5, ls="-",
-                         label=label)
-            axes[1].plot(t_kin, d["fraction_bound_ft"], color=colour, lw=1.5, ls="--",
-                         label="_nolegend_")
-        else:
-            axes[1].plot(t_kin, d["fraction_bound_qt"], color=SPECIES_COLOR_QT, lw=1.5, label="Qt")
-            axes[1].plot(t_kin, d["fraction_bound_ft"], color=SPECIES_COLOR_FT, lw=1.5, label="Ft")
-
-        # 3) Average cluster size
-        axes[2].plot(t_clus, d["avg_sizes"], lw=1.5,
-                     color=colour if multi else "tab:orange", label=label if multi else None)
-
-    axes[0].set_ylabel("Number of bonds")
-    axes[0].set_title(title if title is not None
-                      else ("Agglomeration / deagglomeration cycle" if bnd
-                            else "Agglomeration kinetics"))
-    axes[1].set_ylabel("Fraction bound")
-    axes[1].set_ylim(-0.05, 1.05)
-    axes[2].set_ylabel("Avg cluster size")
-    axes[2].set_xlabel(f"Time ({time_unit})")
-
-    _mark_phase_boundaries(axes[0], bnd, starts, names)
-    _mark_phase_boundaries(axes[1], bnd)
-    _mark_phase_boundaries(axes[2], bnd)
-
-    if multi:
-        # ensemble colours, plus a solid/dashed key for the two species
-        handles, labels = axes[1].get_legend_handles_labels()
-        style = [Line2D([0], [0], color="black", ls="-", lw=1.5),
-                 Line2D([0], [0], color="black", ls="--", lw=1.5)]
-        axes[1].legend(handles + style, labels + ["Qt", "Ft"],
-                       loc="center left", fontsize=FONTSIZE_LEGEND)
-        axes[0].legend(loc="best", fontsize=FONTSIZE_LEGEND)
-    else:
-        axes[1].legend(loc="center left")
-
-    plt.tight_layout()
+    fig, axes = plt.subplots(3, 1, figsize=figsize or figsize_mm(89, 95), sharex=True,
+                             layout='constrained')
+    for which, ax in enumerate(axes):
+        # Phase names only on the top row; the bonds legend (ensembles) only when comparing.
+        _draw_kinetics_panel(ax, which, series, time_factor, bnd, starts, names,
+                             phase_labels=(which == 0), legend=(which != 2))
+    axes[2].set_xlabel(time_label)
+    fig.align_ylabels(axes)
+    if title:
+        axes[0].set_title(title)
 
     if save_path:
         fig.savefig(save_path, bbox_inches="tight", dpi=300)
         print(f"✓ Saved plot to {save_path}")
     if save_path_base:
-        for ext in ("svg", "png"):
-            p = f"{save_path_base}.{ext}"
-            fig.savefig(p, format=ext, bbox_inches="tight", dpi=300)
-            print(f"✓ Saved plot to {p}")
+        _save_figure(fig, save_path_base)
+        # The same three panels as separate single-column figures, without titles.
+        sub_dir = f"{save_path_base}_subfigures"
+        for which, (name, _) in enumerate(_KINETICS_PANELS):
+            sub, ax = plt.subplots(figsize=figsize_mm(89, 45), layout='constrained')
+            _draw_kinetics_panel(ax, which, series, time_factor, bnd, starts, names,
+                                 phase_labels=True, legend=True)
+            ax.set_xlabel(time_label)
+            _save_figure(sub, os.path.join(sub_dir, name))
+            plt.close(sub)
     return fig
 
 
@@ -882,7 +919,7 @@ def plot_phased_kinetics(
     config: "SimulationConfig",
     phase_files: Optional[List[str]] = None,
     save_path: Optional[str] = None,
-    figsize: Tuple[float, float] = (11, 9),
+    figsize: Optional[Tuple[float, float]] = None,
     data: Optional[Dict[str, Any]] = None,
     title: Optional[str] = None,
 ):
