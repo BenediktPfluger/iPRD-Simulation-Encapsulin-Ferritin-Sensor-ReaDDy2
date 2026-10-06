@@ -29,9 +29,13 @@ Usage:
 
 from __future__ import annotations
 
+import functools
+import glob
 import os
+import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
+import matplotlib.font_manager as _fm
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.lines import Line2D
@@ -44,6 +48,171 @@ from .analysis import (
     load_phased_observables,
     _size_category_key,
 )
+
+
+# =============================================================================
+# FIGURE STYLE (Nature)
+# =============================================================================
+# Arial 6/7 pt text, 0.5 pt axes, inward ticks on all four sides, 1 pt data lines; every
+# figure is drawn at its final size (89 mm single column, 183 mm double) and saved as
+# PDF + SVG + PNG with the text left editable. The style is applied per plot function
+# (``_nature_style``), never globally, so other matplotlib figures are unaffected.
+
+# Arial file names (regular, bold, italic, bold italic). Arial Narrow is skipped on purpose.
+_ARIAL_FILES = ("arial.ttf", "arialbd.ttf", "ariali.ttf", "arialbi.ttf")
+
+
+def _arial_search_dirs() -> List[str]:
+    """Folders searched for the Arial files, in order of preference."""
+    dirs = []
+    if os.environ.get("QTFT_FONT_DIR"):
+        dirs.append(os.environ["QTFT_FONT_DIR"])
+    dirs += [
+        "/mnt/c/Windows/Fonts",                       # WSL: the Windows font folder
+        os.path.expanduser("~/.fonts"),
+        os.path.expanduser("~/.local/share/fonts"),
+    ]
+    return dirs
+
+
+def _register_arial() -> bool:
+    """Make Arial available to matplotlib; return True if it is usable.
+
+    matplotlib on Linux/WSL does not see the Windows fonts, so the four Arial files are
+    registered from the first folder that has them. The font files are only read from
+    the system — never copied into the repository (Arial is licensed by Microsoft).
+    """
+    if any(f.name == "Arial" for f in _fm.fontManager.ttflist):
+        return True
+    for folder in _arial_search_dirs():
+        if not os.path.isdir(folder):
+            continue
+        # Match case-insensitively: Windows stores e.g. arial.ttf but sometimes ARIAL.TTF.
+        by_name = {os.path.basename(p).lower(): p for p in glob.glob(os.path.join(folder, "*"))}
+        found = [by_name[n] for n in _ARIAL_FILES if n in by_name]
+        if not found:
+            continue
+        for path in found:
+            try:
+                _fm.fontManager.addfont(path)
+            except Exception:  # unreadable file: try the remaining ones
+                pass
+        if any(f.name == "Arial" for f in _fm.fontManager.ttflist):
+            return True
+    return False
+
+
+ARIAL_AVAILABLE = _register_arial()
+if not ARIAL_AVAILABLE:
+    warnings.warn(
+        "Arial not found (searched $QTFT_FONT_DIR, /mnt/c/Windows/Fonts, ~/.fonts, "
+        "~/.local/share/fonts); figures fall back to Liberation Sans / DejaVu Sans. "
+        "Set QTFT_FONT_DIR to a folder containing arial.ttf to fix this.",
+        stacklevel=2,
+    )
+
+NATURE_RC: Dict[str, Any] = {
+    'font.family': 'sans-serif',
+    'font.sans-serif': ['Arial', 'Helvetica', 'Liberation Sans', 'DejaVu Sans'],
+    'font.size': 7, 'axes.labelsize': 7, 'axes.titlesize': 7,
+    'figure.titlesize': 7, 'figure.labelsize': 7,
+    'legend.fontsize': 7, 'legend.title_fontsize': 7,
+    'xtick.labelsize': 6, 'ytick.labelsize': 6,
+    'axes.linewidth': 0.5, 'lines.linewidth': 1.0, 'lines.markersize': 3,
+    'lines.markeredgewidth': 0.3,                       # matplotlib's 1 pt outline looks too heavy
+    'xtick.major.width': 0.5, 'ytick.major.width': 0.5,
+    'xtick.minor.width': 0.4, 'ytick.minor.width': 0.4,
+    'xtick.major.size': 2.5, 'ytick.major.size': 2.5,
+    'xtick.minor.size': 1.5, 'ytick.minor.size': 1.5,
+    'xtick.direction': 'in', 'ytick.direction': 'in',
+    'xtick.top': True, 'ytick.right': True,
+    'xtick.minor.visible': True, 'ytick.minor.visible': True,
+    'legend.frameon': False, 'legend.handlelength': 1.5, 'legend.markerscale': 1.5,
+    'axes.grid': False,
+    'svg.fonttype': 'none', 'pdf.fonttype': 42, 'ps.fonttype': 42,   # editable text
+    'savefig.dpi': 300,
+    # bbox_inches='tight' pads the content by this much. Equal to constrained layout's own
+    # margin (w_pad = h_pad = 3/72 in), so a figure drawn at 89 mm is also saved at 89 mm.
+    'savefig.pad_inches': 3 / 72,
+    'figure.dpi': 200,          # on-screen (Jupyter) size only; saved files are unaffected
+}
+if ARIAL_AVAILABLE:
+    NATURE_RC.update({'mathtext.fontset': 'custom', 'mathtext.rm': 'Arial',
+                      'mathtext.it': 'Arial:italic', 'mathtext.bf': 'Arial:bold',
+                      # unused slots, pointed at Arial so mathtext never looks for 'cursive'
+                      'mathtext.sf': 'Arial', 'mathtext.cal': 'Arial:italic'})
+else:
+    NATURE_RC['mathtext.fontset'] = 'dejavusans'
+
+# Exponents of 10^x tick labels at 5 pt (5/6 of the 6 pt tick label; matplotlib's 0.7 gives
+# 4.2 pt). This is a private, process-wide matplotlib constant read at draw time, so it is
+# set once here and guarded against matplotlib versions that drop it.
+try:
+    import matplotlib._mathtext as _mathtext
+    _mathtext.SHRINK_FACTOR = 5 / 6
+except Exception as exc:  # pragma: no cover - depends on matplotlib internals
+    warnings.warn(f"10^x exponent size not changed: {exc}", stacklevel=2)
+
+MM = 1 / 25.4               # inches per mm
+WIDTH_1COL_MM = 89.0        # Nature single column
+WIDTH_2COL_MM = 183.0       # Nature double column
+MAX_HEIGHT_MM = 170.0
+
+
+def figsize_mm(w: float = WIDTH_1COL_MM, h: float = 45.0) -> Tuple[float, float]:
+    """Figure size in inches from millimetres (default: single-column time course)."""
+    return (w * MM, h * MM)
+
+
+def _draw_all(result) -> None:
+    """Draw every figure in ``result`` (a Figure, or a dict/list of them).
+
+    Tick artists are created lazily at draw time from the *current* rcParams. Drawing
+    once inside the style context fixes the styled ticks in place, so a later draw
+    outside it (e.g. Jupyter's inline display) shows the same figure that was saved.
+    """
+    if isinstance(result, plt.Figure):
+        figs = [result]
+    elif isinstance(result, dict):
+        figs = [f for f in result.values() if isinstance(f, plt.Figure)]
+    elif isinstance(result, (list, tuple)):
+        figs = [f for f in result if isinstance(f, plt.Figure)]
+    else:
+        figs = []
+    for fig in figs:
+        fig.canvas.draw()
+
+
+def _nature_style(func):
+    """Run a public plot function inside the Nature rc context."""
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        with plt.rc_context(NATURE_RC):
+            result = func(*args, **kwargs)
+            _draw_all(result)
+        return result
+    return wrapper
+
+
+def _save_figure(fig: plt.Figure, path_stem: str,
+                 formats: Tuple[str, ...] = ("pdf", "svg", "png")) -> List[str]:
+    """Save ``fig`` as ``{path_stem}.pdf/.svg/.png`` (PNG at 300 dpi), tight bounding box.
+
+    Creates the parent folder if needed and returns the written paths. Call it inside
+    the style context so the editable-text settings (``svg.fonttype``/``pdf.fonttype``)
+    apply.
+    """
+    parent = os.path.dirname(path_stem)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    written = []
+    for fmt in formats:
+        path = f"{path_stem}.{fmt}"
+        fig.savefig(path, format=fmt, bbox_inches='tight',
+                    dpi=300 if fmt == 'png' else None)
+        written.append(path)
+        print(f"✓ Saved plot to {path}")
+    return written
 
 
 def _time_axis(times_us):
