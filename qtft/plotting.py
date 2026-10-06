@@ -234,11 +234,8 @@ def _time_axis(times_us):
 # CONSTANTS (Plotting)
 # =============================================================================
 
-# Plotting fontsize configuration (consistent across all plots)
-FONTSIZE_TITLE = 14
-FONTSIZE_LABEL = 12
-FONTSIZE_LEGEND = 10
-FONTSIZE_TICK = 10
+
+# Font sizes, line widths and tick styling all come from NATURE_RC (see FIGURE STYLE).
 
 # Species colours used wherever Qt/Ft (or QtC/FtC) are drawn as separate series: the
 # coordination plots and the fraction-bound panel of plot_kinetics. Deliberately
@@ -434,13 +431,13 @@ def _total_particles(ens: dict):
     return None
 
 
-def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, title: str, *,
+def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, *,
                            show_bands: bool, divide_by_N: bool = False) -> bool:
     """Overlay a basic-stats time series (``ens['stats']``) per ensemble on ``ax``.
 
-    Draws lines/bands + labels/title; the caller places the legend (so standalone and
-    panel can differ). When ``divide_by_N`` is True, mean/std are divided by ``_total_particles``.
-    Returns True if any data was drawn.
+    Draws lines/bands and axis labels; the caller adds title and legend (so standalone
+    and panel can differ). When ``divide_by_N`` is True, mean/std are divided by
+    ``_total_particles``. Returns True if any data was drawn.
     """
     labels = comparison['labels']
     # One time unit for the whole (multi-ensemble) axis, from the longest series.
@@ -450,15 +447,20 @@ def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, tit
         default=0.0,
     )
     time_factor, time_unit = choose_time_unit(max_us)
+    mean_key, std_key = f'{stat_key}_mean', f'{stat_key}_std'
+    # One power-of-ten factor for all ensembles, folded into the unit of the y label.
+    scale, prefix = (1.0, "") if divide_by_N else _magnitude_scale(np.concatenate(
+        [np.ravel(comparison['ensembles'][l]['stats'][mean_key]) for l in labels
+         if mean_key in comparison['ensembles'][l]['stats']] or [np.zeros(1)]))
+    ylabel = _with_unit_prefix(ylabel, prefix)
     has_data = False
     for i, label in enumerate(labels):
         ens = comparison['ensembles'][label]
-        mean_key = f'{stat_key}_mean'
-        std_key = f'{stat_key}_std'
         if mean_key not in ens['stats']:
             continue
-        mean_vals = np.asarray(ens['stats'][mean_key], dtype=float)
-        std_vals = np.asarray(ens['stats'].get(std_key, np.zeros_like(mean_vals)), dtype=float)
+        mean_vals = np.asarray(ens['stats'][mean_key], dtype=float) * scale
+        std_vals = np.asarray(ens['stats'].get(std_key, np.zeros_like(mean_vals)),
+                              dtype=float) * scale
         if divide_by_N:
             N = _total_particles(ens)
             if not N:
@@ -467,27 +469,24 @@ def _comparison_timeseries(ax, comparison: dict, stat_key: str, ylabel: str, tit
             std_vals = std_vals / N
         color = COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
         t = np.asarray(ens['times_us']) * time_factor
-        ax.plot(t, mean_vals, color=color, linewidth=2, label=label)
+        ax.plot(t, mean_vals, color=color, label=label)
         if show_bands and len(std_vals) == len(mean_vals):
             ax.fill_between(t, mean_vals - std_vals, mean_vals + std_vals,
-                            color=color, alpha=0.2)
+                            color=color, alpha=0.2, linewidth=0)
         has_data = True
     if not has_data:
         _ensemble_show_no_data(ax)
-    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
-    ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.tick_params(labelsize=FONTSIZE_TICK)
+    ax.set_xlabel(f"Time ({time_unit})")
+    ax.set_ylabel(ylabel)
     return has_data
 
 
 def _comparison_struct_ts(ax, comparison: dict, time_key: str, mean_key: str, std_key: str,
-                          ylabel: str, title: str, *, show_bands: bool,
-                          legend_loc: str = 'best') -> bool:
+                          ylabel: str, *, show_bands: bool) -> bool:
     """Overlay a structural time series (``ens['structural']``) per ensemble on ``ax``.
 
-    Steps→µs via each ensemble's timestep; guards against mismatched array lengths. Places an
-    inside legend at ``legend_loc``. Returns True if any data was drawn.
+    Steps→µs via each ensemble's timestep; guards against mismatched array lengths. The
+    caller adds title and legend. Returns True if any data was drawn.
     """
     labels = comparison['labels']
     # One time unit for the whole (multi-ensemble) axis, from the longest series.
@@ -512,27 +511,23 @@ def _comparison_struct_ts(ax, comparison: dict, time_key: str, mean_key: str, st
         min_len = min(len(times_us), len(mean_vals))
         times_us, mean_vals, std_vals = times_us[:min_len], mean_vals[:min_len], std_vals[:min_len]
         color = COMPARISON_COLORS[i % len(COMPARISON_COLORS)]
-        ax.plot(times_us, mean_vals, color=color, linewidth=2, label=label)
+        ax.plot(times_us, mean_vals, color=color, label=label)
         if show_bands:
             ax.fill_between(times_us, mean_vals - std_vals, mean_vals + std_vals,
-                            color=color, alpha=0.2)
+                            color=color, alpha=0.2, linewidth=0)
         has_data = True
     if not has_data:
         _ensemble_show_no_data(ax)
-    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel(ylabel, fontsize=FONTSIZE_LABEL)
-    ax.set_title(title, fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.tick_params(labelsize=FONTSIZE_TICK)
-    if has_data:
-        ax.legend(loc=legend_loc, fontsize=FONTSIZE_LEGEND)
+    ax.set_xlabel(f"Time ({time_unit})")
+    ax.set_ylabel(ylabel)
     return has_data
 
 
-def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool,
-                            legend_loc: str = 'lower right') -> bool:
+def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool) -> bool:
     """Overlay Qt (solid) and Ft (dashed) coordination per ensemble in one axes.
 
-    Owns its legend (ensemble colours + a Qt/Ft linestyle key). Returns True if data drawn.
+    The Qt/Ft linestyle key is added by the caller's legend (``_comparison_legend_entries``
+    with ``species_key=True``). Returns True if data drawn.
     """
     labels = comparison['labels']
     # One time unit for the whole (multi-ensemble) axis, from the longest series.
@@ -564,24 +559,14 @@ def _comparison_coord_fused(ax, comparison: dict, *, show_bands: bool,
             min_len = min(len(times_us), len(mean_vals))
             t, m, s = times_us[:min_len], mean_vals[:min_len], std_vals[:min_len]
             lbl = label if ls == '-' else '_nolegend_'
-            ax.plot(t, m, color=color, linewidth=2, linestyle=ls, label=lbl)
+            ax.plot(t, m, color=color, linestyle=ls, label=lbl)
             if show_bands:
-                ax.fill_between(t, m - s, m + s, color=color, alpha=0.2)
+                ax.fill_between(t, m - s, m + s, color=color, alpha=0.2, linewidth=0)
             has_data = True
     if not has_data:
         _ensemble_show_no_data(ax)
-    ax.set_xlabel(f"Time ({time_unit})", fontsize=FONTSIZE_LABEL)
-    ax.set_ylabel("Mean Coordination", fontsize=FONTSIZE_LABEL)
-    ax.set_title("Coordination Number", fontsize=FONTSIZE_TITLE, fontweight='bold')
-    ax.tick_params(labelsize=FONTSIZE_TICK)
-    if has_data:
-        ens_handles, ens_labels = ax.get_legend_handles_labels()
-        style_handles = [
-            Line2D([0], [0], color='black', linestyle='-', linewidth=2),
-            Line2D([0], [0], color='black', linestyle='--', linewidth=2),
-        ]
-        ax.legend(ens_handles + style_handles, ens_labels + ['Qt', 'Ft'],
-                  loc=legend_loc, fontsize=FONTSIZE_LEGEND)
+    ax.set_xlabel(f"Time ({time_unit})")
+    ax.set_ylabel("Mean coordination")
     return has_data
 
 
@@ -1247,6 +1232,7 @@ def plot_metrics_panel(
                    plt.Rectangle((0, 0), 1, 1, color='0.2', alpha=0.3, linewidth=0)]
         fig.legend(handles, [f"Mean (N={ctx.n_replicas})", "± 1 SD"],
                    loc='outside lower center', ncol=2)
+    _wrap_wide_titles(fig, axes)
 
     if save_path_base:
         _save_figure(fig, save_path_base)
@@ -1301,73 +1287,148 @@ def plot_metrics_separately(
     return figures
 
 
+def _comparison_legend_entries(comparison: dict, species_key: bool = False):
+    """Ensemble colour entries (+ optional Qt solid / Ft dashed key) for a legend."""
+    handles = [Line2D([0], [0], color=COMPARISON_COLORS[i % len(COMPARISON_COLORS)])
+               for i in range(len(comparison['labels']))]
+    labels = list(comparison['labels'])
+    if species_key:
+        handles += [Line2D([0], [0], color='black', ls='-'),
+                    Line2D([0], [0], color='black', ls='--')]
+        labels += ['Qt', 'Ft']
+    return handles, labels
+
+
+def _wrap_wide_titles(fig: plt.Figure, axes) -> None:
+    """Break any panel title wider than its axes onto two lines (at the middle space).
+
+    Constrained layout never shrinks titles, so a long one in a narrow column would stick
+    out of the figure and make the saved file wider than 183 mm.
+    """
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for ax in np.ravel(axes):
+        title = ax.title
+        text = title.get_text()
+        if " " not in text or "\n" in text:
+            continue
+        if title.get_window_extent(renderer).width <= ax.get_window_extent(renderer).width:
+            continue
+        mid = len(text) / 2
+        cut = min((i for i, c in enumerate(text) if c == " "), key=lambda i: abs(i - mid))
+        title.set_text(text[:cut] + "\n" + text[cut + 1:])
+
+
+def _legend_below(fig: plt.Figure, handles, labels):
+    """Figure legend below the axes, with as many columns as fit the figure width.
+
+    Tries all entries on one row first and drops a column until the measured legend fits,
+    so short labels share a row and long ones wrap instead of overflowing the figure.
+    """
+    renderer = fig.canvas.get_renderer()
+    fig_width = fig.bbox.width
+    for ncol in range(len(labels), 0, -1):
+        leg = fig.legend(handles, labels, loc='outside lower center', ncol=ncol)
+        if ncol == 1 or leg.get_window_extent(renderer).width <= 0.98 * fig_width:
+            return leg
+        leg.remove()
+    return None
+
+
+def _cmp_stat(stat_key, ylabel, divide_by_N=False, ylim=None):
+    def draw(ax, comparison, show_bands):
+        _comparison_timeseries(ax, comparison, stat_key, ylabel,
+                               show_bands=show_bands, divide_by_N=divide_by_N)
+        if ylim is not None:
+            ax.set_ylim(ylim)
+    return draw
+
+
+def _cmp_struct(time_key, base, ylabel, ylim=None):
+    def draw(ax, comparison, show_bands):
+        _comparison_struct_ts(ax, comparison, time_key, f'{base}_mean', f'{base}_std',
+                              ylabel, show_bands=show_bands)
+        if ylim is not None:
+            ax.set_ylim(ylim)
+    return draw
+
+
+def _cmp_coord(ax, comparison, show_bands):
+    _comparison_coord_fused(ax, comparison, show_bands=show_bands)
+
+
+# (file name, panel title, drawer, needs the Qt/Ft linestyle key), in grid order (3 x 4).
+_COMPARISON_METRICS = (
+    ("energy", "Potential energy", _cmp_stat('energy', "Energy (kJ/mol)"), False),
+    ("pressure", "Pressure", _cmp_stat('pressure', "Pressure (kJ/(mol·nm³))"), False),
+    ("bonds", "Number of bonds", _cmp_stat('bonds', "Number of bonds"), False),
+    ("topologies", "Agglomerates and free particles",
+     _cmp_stat('n_clusters', "Agglomerates and\nfree particles"), False),
+    ("avg_cluster_size", "Average agglomerate size",
+     _cmp_stat('avg_cluster', "Average agglomerate\nsize (particles)"), False),
+    ("avg_cluster_size_normalized", "Normalized average size",
+     _cmp_stat('avg_cluster', "Fraction of particles", divide_by_N=True), False),
+    ("largest_cluster_size", "Largest agglomerate",
+     _cmp_stat('largest_cluster', "Largest agglomerate\n(particles)"), False),
+    ("largest_cluster_size_normalized", "Normalized largest size",
+     _cmp_stat('largest_cluster', "Fraction of particles", divide_by_N=True, ylim=[0, 1]),
+     False),
+    ("mean_rg", "Mean radius of gyration",
+     _cmp_struct('morphology_times', 'mean_rg', "Mean Rg (nm)"), False),
+    ("mean_rg_normalized", "Normalized radius of gyration",
+     _cmp_struct('morphology_times', 'mean_rg_normalized', r"Rg / Rg$_{\mathrm{ideal}}$"),
+     False),
+    ("coordination", "Coordination number", _cmp_coord, True),
+    ("mean_composition", "Mean agglomerate composition",
+     _cmp_struct('composition_times', 'mean_composition', "Mean Qt fraction", ylim=[0, 1]),
+     False),
+)
+
+
+@_nature_style
 def plot_comparison_panel(
     comparison: dict,
     *,
     show_bands: Optional[bool] = None,
-    figsize: Tuple[float, float] = (24, 17),
+    figsize: Optional[Tuple[float, float]] = None,
     save_path_base: Optional[str] = None,
 ) -> plt.Figure:
-    """Cross-ensemble comparison thesis panel (3x4 grid); optionally saves {base}.svg + .png.
+    """Cross-ensemble comparison thesis panel (3x4 grid, 183 mm wide).
 
-    Rows 1-2 overlay per-ensemble basic statistics (with two ÷N-normalized cluster-size panels);
-    Row 3 overlays structural metrics (needs the live `compare_ensembles` structural data).
+    Rows 1-2 overlay per-ensemble basic statistics (with two ÷N-normalized agglomerate-size
+    panels); Row 3 overlays structural metrics (needs the live `compare_ensembles`
+    structural data). One shared legend below the grid carries the ensemble colours and
+    the Qt solid / Ft dashed key of the coordination panel.
+
+    With ``save_path_base`` the panel is saved as ``{base}.pdf/.svg/.png`` and every one
+    of the 12 panels additionally as a separate, title-free 89 × 55 mm figure (legend
+    below the axes) in ``{base}_subfigures/{name}.pdf/.svg/.png``.
     """
     print("\nGenerating ensemble comparison thesis panel...")
 
-    fig = plt.figure(figsize=figsize)
-    gs = fig.add_gridspec(3, 4, hspace=0.35, wspace=0.3)
     show_bands = _get_show_bands_default(comparison['n_ensembles'], show_bands)
+    fig, axes = plt.subplots(3, 4, figsize=figsize or figsize_mm(WIDTH_2COL_MM, 140),
+                             layout='constrained')
+    for ax, (_, title, draw, _) in zip(axes.flat, _COMPARISON_METRICS):
+        draw(ax, comparison, show_bands)
+        ax.set_title(title)
+    # Every panel shares the time axis: x label on the bottom row only.
+    for ax in axes[:-1].flat:
+        ax.set_xlabel("")
 
-    def stat(ax, stat_key, ylabel, title, legend_loc='best', divide_by_N=False):
-        if _comparison_timeseries(ax, comparison, stat_key, ylabel, title,
-                                  show_bands=show_bands, divide_by_N=divide_by_N):
-            ax.legend(loc=legend_loc, fontsize=FONTSIZE_LEGEND)
-
-    # Row 1
-    stat(fig.add_subplot(gs[0, 0]), 'energy', "Energy (kJ/mol)", "Potential Energy",
-         legend_loc='lower left')
-    stat(fig.add_subplot(gs[0, 1]), 'pressure', "Pressure (kJ/(mol·nm³))", "Pressure",
-         legend_loc='upper left')
-    stat(fig.add_subplot(gs[0, 2]), 'bonds', "Number of Bonds", "Number of Bonds",
-         legend_loc='lower right')
-    stat(fig.add_subplot(gs[0, 3]), 'n_clusters', "Number of Individual Topologies",
-         "Number of Individual Topologies", legend_loc='upper right')
-
-    # Row 2
-    stat(fig.add_subplot(gs[1, 0]), 'avg_cluster', "Average Size (particles)",
-         "Average Cluster Size", legend_loc='upper left')
-    stat(fig.add_subplot(gs[1, 1]), 'avg_cluster', "Fraction of particles",
-         "Average Cluster Size (normalized)", legend_loc='upper left', divide_by_N=True)
-    stat(fig.add_subplot(gs[1, 2]), 'largest_cluster', "Cluster Size (particles)",
-         "Largest Cluster Size", legend_loc='upper left')
-    ax_largest_norm = fig.add_subplot(gs[1, 3])
-    stat(ax_largest_norm, 'largest_cluster', "Fraction of particles",
-         "Largest Cluster Size (normalized)", legend_loc='upper left', divide_by_N=True)
-    ax_largest_norm.set_ylim([0, 1])
-
-    # Row 3
-    _comparison_struct_ts(fig.add_subplot(gs[2, 0]), comparison, 'morphology_times',
-                          'mean_rg_mean', 'mean_rg_std', "Mean Rg (nm)",
-                          "Mean Radius of Gyration", show_bands=show_bands, legend_loc='upper left')
-    _comparison_struct_ts(fig.add_subplot(gs[2, 1]), comparison, 'morphology_times',
-                          'mean_rg_normalized_mean', 'mean_rg_normalized_std',
-                          r"Rg / Rg$_{\mathrm{ideal}}$", "Normalized Radius of Gyration",
-                          show_bands=show_bands, legend_loc='lower right')
-    _comparison_coord_fused(fig.add_subplot(gs[2, 2]), comparison,
-                            show_bands=show_bands, legend_loc='lower right')
-    ax_comp = fig.add_subplot(gs[2, 3])
-    _comparison_struct_ts(ax_comp, comparison, 'composition_times', 'mean_composition_mean',
-                          'mean_composition_std', "Mean Qt Fraction", "Mean Cluster Composition",
-                          show_bands=show_bands, legend_loc='lower right')
-    ax_comp.set_ylim([0, 1])
+    handles, labels = _comparison_legend_entries(comparison, species_key=True)
+    _legend_below(fig, handles, labels)
+    _wrap_wide_titles(fig, axes)
 
     if save_path_base:
-        for ext in ("svg", "png"):
-            path = f"{save_path_base}.{ext}"
-            fig.savefig(path, format=ext, bbox_inches='tight', dpi=300)
-            print(f"✓ Saved panel to {path}")
-
+        _save_figure(fig, save_path_base)
+        sub_dir = f"{save_path_base}_subfigures"
+        for name, _, draw, species_key in _COMPARISON_METRICS:
+            sub, ax = plt.subplots(figsize=figsize_mm(89, 55), layout='constrained')
+            draw(ax, comparison, show_bands)
+            _legend_below(sub, *_comparison_legend_entries(comparison, species_key=species_key))
+            _save_figure(sub, os.path.join(sub_dir, name))
+            plt.close(sub)
     return fig
 
 
