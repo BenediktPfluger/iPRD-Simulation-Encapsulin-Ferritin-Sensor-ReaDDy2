@@ -42,6 +42,11 @@ FREE_TYPE = "Qt"         # free (unbound) encapsulin
 # the same convention the plotting notebook uses for ``Plots/``.
 OUTPUT_SUBDIR = "FIBSEM_Comparison_Export"
 
+# Default output file names inside that folder. (Exports written before 2026-10 used
+# encapsulin_centroids{file_tag}.csv / structural_information_and_metadata{file_tag}.json.)
+DEFAULT_CSV_NAME = "sim_encapsulin_centroids_clustered.csv"
+DEFAULT_JSON_NAME = "sim_metadata.json"
+
 
 def _unwrap(positions: np.ndarray, box_size, periodic: bool = True) -> np.ndarray:
     """Unwrap one cluster's positions across periodic boundaries.
@@ -283,8 +288,8 @@ def default_out_dir(trajectory_file: str) -> str:
     """``<run_dir>/FIBSEM_Comparison_Export`` for a trajectory this project produced.
 
     Keeps each export beside the run it describes (the ``.h5`` / ``.xyz`` / ``_config.json``),
-    so runs no longer overwrite one another in a shared folder and ``file_tag`` is not needed
-    to tell them apart.
+    so runs no longer overwrite one another in a shared folder and the file names need no
+    per-run tag.
 
     The run directory is the trajectory's own directory, except for a phased run whose combine
     step was skipped: there ``analysis.resolve_trajectory`` returns the last
@@ -304,13 +309,14 @@ def export(
     config,
     out_dir: Optional[str] = None,
     voxel_nm: float = 4.0,
-    file_tag: str = "_simulation",
+    csv_name: str = DEFAULT_CSV_NAME,
+    json_name: str = DEFAULT_JSON_NAME,
     verbose: bool = True,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
     """Extract final-frame encapsulins and write the FIB-SEM-schema CSV + metadata JSON.
 
-    Writes ``encapsulin_centroids{file_tag}.csv`` and
-    ``structural_information_and_metadata{file_tag}.json`` into ``out_dir``.
+    Writes ``csv_name`` (default ``sim_encapsulin_centroids_clustered.csv``) and
+    ``json_name`` (default ``sim_metadata.json``) into ``out_dir``.
     ``out_dir=None`` (the default) writes into ``default_out_dir(trajectory_file)``, i.e.
     ``<run_dir>/FIBSEM_Comparison_Export``; pass a path to override.
     Returns ``(df, info)``.
@@ -325,8 +331,8 @@ def export(
                                        voxel_nm=voxel_nm,
                                        periodic=getattr(config, "is_periodic", True))
 
-    csv_path = os.path.join(out_dir, f"encapsulin_centroids{file_tag}.csv")
-    json_path = os.path.join(out_dir, f"structural_information_and_metadata{file_tag}.json")
+    csv_path = os.path.join(out_dir, csv_name)
+    json_path = os.path.join(out_dir, json_name)
     df.to_csv(csv_path, index=False)
 
     sizes = df["cluster"].value_counts()

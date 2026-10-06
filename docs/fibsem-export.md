@@ -50,13 +50,17 @@ steps up out of a `phase_NNN/` folder, so a phased run's export lands at run lev
 - **Volumes are analytical** (4/3·π·r³), and `radius_nm` is stored per row so a later notebook
   can compute an exact mass integral ⟨M(R)⟩ from ball–ball intersections, with no voxelisation.
 
-**Outputs** (into `<run_dir>/FIBSEM_Comparison_Export/` unless `out_dir` overrides it,
-suffixed with `file_tag`, default `_simulation`):
+**Outputs** (into `<run_dir>/FIBSEM_Comparison_Export/` unless `out_dir` overrides it; the
+names are the `csv_name` / `json_name` defaults of `export()`):
 
 | File | Format | Contents |
 |------|--------|----------|
-| `encapsulin_centroids_simulation.csv` | CSV | one row per encapsulin: `label, z/y/x_nm, z/y/x_vox, radius_nm, volume_nm3, cluster, is_clustered` |
-| `structural_information_and_metadata_simulation.json` | JSON | source trajectory, final step / µs, encapsulin and cluster counts, cluster-size histogram, box, applied coordinate offset, and the full flattened config |
+| `sim_encapsulin_centroids_clustered.csv` | CSV | one row per encapsulin: `label, z/y/x_nm, z/y/x_vox, radius_nm, volume_nm3, cluster, is_clustered` |
+| `sim_metadata.json` | JSON | source trajectory, final step / µs, encapsulin and cluster counts, cluster-size histogram, box, applied coordinate offset, and the full flattened config |
+
+Exports written before 2026-10 used the names `encapsulin_centroids{file_tag}.csv` and
+`structural_information_and_metadata{file_tag}.json` (default tag `_simulation`); those files
+are left as they are.
 
 > **Caveat — periodicity is not preserved.** Each cluster is unwrapped independently and then
 > everything is shifted by one global offset. Within a cluster the geometry is exact, but
